@@ -1,0 +1,26 @@
+{
+  "name": "revoice",
+  "version": "1.0.0",
+  "description": "Select text anywhere on macOS, hit a hotkey, get it rewritten in your own voice — via Claude Code, any OpenAI-compatible API (Kimi), or a local Ollama model, with a rewrite prompt you fully control.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "revoice": "./bin/revoice.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool-.git"
+  },
+  "keywords": [
+    "macos",
+    "hammerspoon",
+    "rewrite",
+    "hotkey",
+    "claude",
+    "ollama",
+    "writing"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
