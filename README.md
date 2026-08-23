@@ -1,6 +1,20 @@
-# ✍️ revoice
+<div align="center">
+
+<img src="assets/orb.png" width="160" alt="the revoice orb" />
+
+# revoice
 
 **Select text. Hit a hotkey. It's rewritten in your voice — right where you typed it.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS-blue)
+![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)
+![Dependencies](https://img.shields.io/badge/dependencies-zero-purple)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ff69b4.svg)](CONTRIBUTING.md)
+
+<img src="assets/hud.png" width="560" alt="the liquid-glass rewrite HUD" />
+
+</div>
 
 You're already paying for AI (Claude, Kimi, or you run a free local model). So why pay for *another* subscription just to clean up your messages? revoice turns the AI you already have into a system-wide rewrite button on your Mac.
 
@@ -14,6 +28,14 @@ It works anywhere you can select text — Slack, Mail, Notion, your browser, you
 4. Press **⏎** to swap it in — or **esc** to keep your original. Nothing is pasted until you say so.
 
 That's it. Your clipboard is untouched, your cursor stays where it was, and the popup tells you which AI did the work.
+
+**Before** (what you typed):
+
+> hey just wanted to check in and see if u had a chance to look at the thing i sent over, no rush but lmk when u can
+
+**After** (one keystroke later):
+
+> Hey, have you had a look at that document I sent? Let me know when you get to it.
 
 ## Pick your vibe
 
@@ -73,3 +95,11 @@ Want to hack on it? The whole tool is three files — see **[CONTRIBUTING.md](CO
 ## License
 
 [MIT](LICENSE) — free to use, share, and remix.
+
+---
+
+<div align="center">
+
+If revoice makes your writing faster, a ⭐ helps other people find it.
+
+</div>
