@@ -16,7 +16,7 @@
 
 </div>
 
-You're already paying for AI (Claude, Kimi, or you run a free local model). So why pay for *another* subscription just to clean up your messages? revoice turns the AI you already have into a system-wide rewrite button on your Mac.
+You're already paying for AI (ChatGPT, Claude, Kimi, or you run a free local model). So why pay for *another* subscription just to clean up your messages? revoice turns the AI you already have into a system-wide rewrite button on your Mac.
 
 It works anywhere you can select text — Slack, Mail, Notion, your browser, your editor. No app switching, no copy-paste dance, no new subscription.
 
@@ -71,6 +71,7 @@ Then open Hammerspoon, grant it **Accessibility** permission (System Settings �
 
 **Hook up an AI** (any one of these):
 
+- **ChatGPT (GPT-6 Astra)** — already have Codex? You're done. (If not: `npm i -g @openai/codex`, run `codex` once to sign in with your ChatGPT account.) Want Astra to go first? Put `REWRITE_BACKEND=codex,claude,kimi,ollama` in `~/.revoice/env`.
 - **Claude** — already have Claude Code? You're done. (If not: `npm i -g @anthropic-ai/claude-code`, run `claude` once to sign in.)
 - **Kimi** (or any OpenAI-compatible API) — drop `KIMI_API_KEY=sk-...` into `~/.revoice/env`.
 - **Totally free & private** — `brew install ollama && ollama pull llama3.2:3b` and everything runs on your Mac. Nothing leaves your machine.

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Codex / GPT-6 Astra backend** (`--backend codex`): rewrites through your ChatGPT subscription via the Codex CLI (`codex exec`, default model `gpt-6-astra`, `model_reasoning_effort=low`). Options: `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_TIMEOUT_MS`.
+- **`REWRITE_BACKEND`** setting (env or `~/.revoice/env`) to choose the default backend or reorder the fallback chain used by the hotkeys, e.g. `REWRITE_BACKEND=codex,claude,kimi,ollama` makes Astra the default. `--backend` accepts the same comma-separated chains.
+
+### Changed
+- Automatic chain is now Claude → Codex → Kimi → Ollama (Codex is skipped instantly when the CLI isn't installed).
+
 ## [1.0.0] - 2026-08-22
 
 First public release.
@@ -26,4 +35,5 @@ First public release.
 - **Zero-dependency Node CLI** (`revoice`), usable standalone: `echo "text" | revoice`.
 - Installer (`install.sh`) that sets up Hammerspoon, the CLI, prompts, styles, and skills, and migrates config from the tool's pre-release `~/.spiral-rewrite` layout.
 
+[Unreleased]: https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool-/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool-/releases/tag/v1.0.0

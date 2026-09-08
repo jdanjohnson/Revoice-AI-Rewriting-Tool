@@ -1,7 +1,7 @@
 {
   "name": "revoice",
   "version": "1.0.0",
-  "description": "Select text anywhere on macOS, hit a hotkey, get it rewritten in your own voice — via Claude Code, any OpenAI-compatible API (Kimi), or a local Ollama model, with a rewrite prompt you fully control.",
+  "description": "Select text anywhere on macOS, hit a hotkey, get it rewritten in your own voice — via Claude Code, Codex (GPT-6 Astra), any OpenAI-compatible API (Kimi), or a local Ollama model, with a rewrite prompt you fully control.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -17,6 +17,8 @@
     "rewrite",
     "hotkey",
     "claude",
+    "codex",
+    "openai",
     "ollama",
     "writing"
   ],
