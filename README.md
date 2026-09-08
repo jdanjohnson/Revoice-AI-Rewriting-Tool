@@ -47,8 +47,15 @@ That's it. Your clipboard is untouched, your cursor stays where it was, and the 
 | **⌃⇧3** | Professional — polished business |
 | **⌃⇧4** | Concise — about half the words |
 | **⌃⇧E** | Tell it what to do ("make it shorter", "make it warmer", anything) |
+| **⌃⇧R** | **Reply mode** — it looks at the thread on your screen, asks what you want to say, and drafts the reply in your voice |
 
 Don't like the rewrite? Press **R** to regenerate or **1–4** to instantly re-run it in another style, right from the preview.
+
+## Reply to anything in one keystroke
+
+Staring at a Slack thread or an email you need to answer? Click into the reply box and hit **⌃⇧R**. revoice screenshots the window, asks *"What do you want to say?"* (a few rough words — or nothing, and it'll infer), and drafts the reply in your voice from what it sees on screen. Same preview: ⏎ pastes it, esc throws it away.
+
+Best with the Codex/GPT-6 Astra backend, which reads the screenshot natively. The screenshot sits in `~/.revoice/tmp` only while the draft is in flight and is cleaned up afterwards, and nothing is captured unless you press the hotkey. macOS will ask you to allow **Screen Recording** for Hammerspoon the first time.
 
 ## It actually sounds like *you*
 
@@ -91,7 +98,7 @@ Want to hack on it? The whole tool is three files — see **[CONTRIBUTING.md](CO
 ## Requirements & fine print
 
 - macOS (hotkeys use [Hammerspoon](https://www.hammerspoon.org/); the installer sets it up). The CLI itself runs anywhere Node ≥18 does.
-- Unless you use the local Ollama backend, selected text is sent to your AI provider — don't hotkey your passwords.
+- Unless you use the local Ollama backend, selected text (and, in Reply mode, a screenshot of the frontmost window) is sent to your AI provider — don't hotkey your passwords.
 
 ## License
 
