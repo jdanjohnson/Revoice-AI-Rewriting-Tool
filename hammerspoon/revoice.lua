@@ -5,6 +5,8 @@
 -- ⌃⇧2 : rewrite in Casual style (relaxed, friendly)
 -- ⌃⇧3 : rewrite in Professional style (polished business)
 -- ⌃⇧4 : rewrite in Concise style (half the words)
+-- ⌃⇧R : Reply mode — screenshots the frontmost window, asks what you want to
+--       say, and drafts the reply in your voice (Codex/Astra reads the shot)
 --
 -- The rewrite streams into a glowing orb HUD, then lands in a preview:
 --   ⏎ paste it · R regenerate · 1–4 re-run in a style · esc keep original
@@ -285,6 +287,24 @@ end
 
 local preview = { wv = nil, modal = nil, watchdog = nil, tap = nil }
 
+-- reply mode: snapshot the frontmost window to a temp PNG (nil if the
+-- snapshot fails, e.g. Screen Recording permission not granted yet)
+local function captureFrontmostWindow()
+  local win = hs.window.frontmostWindow()
+  if not win then return nil end
+  local ok, img = pcall(function() return win:snapshot() end)
+  if not ok or not img then return nil end
+  local size = img:size()
+  if size and size.w > 1800 then
+    img = img:setSize({ w = 1800, h = size.h * 1800 / size.w })
+  end
+  local dir = os.getenv("HOME") .. "/.revoice/tmp"
+  hs.fs.mkdir(dir)
+  local file = string.format("%s/reply-%d.png", dir, math.floor(hs.timer.secondsSinceEpoch() * 1000))
+  if not img:saveToFile(file) then return nil end
+  return file
+end
+
 local function previewClose()
   if preview.watchdog then preview.watchdog:stop(); preview.watchdog = nil end
   if preview.tap then preview.tap:stop(); preview.tap = nil end
@@ -309,7 +329,7 @@ local function previewShow(result, ctx)
   local textH = measure:minimumTextSize(styled).h
   measure:delete()
   local h = math.min(math.max(textH * 1.1 + 96, 150), screen.h * 0.6)
-  local title = "rewrite ready"
+  local title = ctx.extra and ctx.extra.reply and "reply ready" or "rewrite ready"
   if ctx.style and ctx.style ~= "" then title = title .. " · " .. ctx.style end
   if ctx.via then title = title .. " · " .. ctx.via end
   preview.wv = hs.webview.new({
@@ -331,6 +351,7 @@ local function previewShow(result, ctx)
       ctx.targetWindow:focus()
       hs.timer.usleep(300000)
     end
+    if ctx.extra and ctx.extra.image then os.remove(ctx.extra.image) end
     hs.pasteboard.setContents(result)
     local pasteCount = hs.pasteboard.changeCount()
     hs.eventtap.keyStroke({ "cmd" }, "v")
@@ -345,13 +366,14 @@ local function previewShow(result, ctx)
   preview.modal:bind({}, "escape", function()
     previewClose()
     restoreClipboard(ctx.oldClipboard)
+    if ctx.extra and ctx.extra.image then os.remove(ctx.extra.image) end
     markLast("rejected")
     hs.alert.show("kept your original", 1)
   end)
   preview.modal:bind({}, "r", function()
     previewClose()
     markLast("rejected", function()
-      doRewrite(ctx.sel, ctx.oldClipboard, ctx.instruction, ctx.style, ctx.targetWindow)
+      doRewrite(ctx.sel, ctx.oldClipboard, ctx.instruction, ctx.style, ctx.targetWindow, ctx.extra)
     end)
   end)
   local STYLE_KEYS = { "founder", "casual", "professional", "concise" }
@@ -359,7 +381,7 @@ local function previewShow(result, ctx)
     preview.modal:bind({}, tostring(i), function()
       previewClose()
       markLast("rejected", function()
-        doRewrite(ctx.sel, ctx.oldClipboard, ctx.instruction, style, ctx.targetWindow)
+        doRewrite(ctx.sel, ctx.oldClipboard, ctx.instruction, style, ctx.targetWindow, ctx.extra)
       end)
     end)
   end
@@ -389,7 +411,25 @@ local function previewShow(result, ctx)
   end)
 end
 
-doRewrite = function(sel, oldClipboard, instruction, style, targetWindow)
+-- remove stale reply-mode screenshots (regenerate/restyle from the preview
+-- re-run the CLI with the same file, so only sweep ones older than 2 minutes;
+-- accept/reject delete their own file immediately)
+local function cleanupReplyImages()
+  local dir = os.getenv("HOME") .. "/.revoice/tmp"
+  local ok, iter, dirObj = pcall(hs.fs.dir, dir)
+  if not ok or not iter then return end
+  local cutoff = hs.timer.secondsSinceEpoch() - 120
+  for name in iter, dirObj do
+    if name:match("^reply%-%d+%.png$") then
+      local path = dir .. "/" .. name
+      local attrs = hs.fs.attributes(path)
+      if attrs and attrs.modification < cutoff then os.remove(path) end
+    end
+  end
+end
+
+-- extra (optional): { reply = true, image = "/path.png", context = "text being replied to" }
+doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
   local node = findNode()
   if not node then
     restoreClipboard(oldClipboard)
@@ -398,7 +438,9 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow)
   end
 
   targetWindow = targetWindow or hs.window.frontmostWindow()
-  hudStart(style)
+  local hudLabel = style
+  if extra and extra.reply then hudLabel = style and (style .. " reply") or "reply" end
+  hudStart(hudLabel)
 
   local args = { CLI, "--stream", "--log-history" }
   if instruction and instruction ~= "" then
@@ -408,6 +450,17 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow)
   if style and style ~= "" then
     table.insert(args, "--style")
     table.insert(args, style)
+  end
+  if extra and extra.reply then
+    table.insert(args, "--reply")
+    if extra.image and hs.fs.attributes(extra.image) then
+      table.insert(args, "--image")
+      table.insert(args, extra.image)
+    end
+    if extra.context and extra.context ~= "" then
+      table.insert(args, "--context")
+      table.insert(args, extra.context)
+    end
   end
 
   local collected, collectedErr = "", ""
@@ -429,6 +482,7 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow)
           style = style,
           via = via,
           targetWindow = targetWindow,
+          extra = extra,
         })
       end)
       if menubarRefresh then menubarRefresh() end
@@ -437,7 +491,11 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow)
       restoreClipboard(oldClipboard)
       local err = collectedErr
       if not err or err == "" then err = "unknown error" end
-      hs.alert.show("Rewrite failed: " .. err, 4)
+      hs.alert.show((extra and extra.reply and "Reply" or "Rewrite") .. " failed: " .. err, 4)
+    end
+    if extra and extra.reply then
+      cleanupReplyImages()
+      hs.timer.doAfter(125, cleanupReplyImages)
     end
   end, function(_, stdOut, stdErr)
     if stdOut and stdOut ~= "" then
@@ -453,7 +511,7 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow)
     hs.alert.show("revoice: failed to launch CLI", 4)
     return
   end
-  task:setInput(sel)
+  task:setInput(sel or "")
   if not task:start() then
     hudStop()
     restoreClipboard(oldClipboard)
@@ -500,6 +558,36 @@ hs.hotkey.bind({ "ctrl", "shift" }, "e", function()
       restoreClipboard(old)
     end
   end)
+end)
+
+-- ⌃⇧R: Reply mode — screenshot the frontmost window (the thread you're in),
+-- ask what you want to say, draft the reply in your voice, preview, paste.
+-- Any selected text is sent along as extra context. The screenshot goes to
+-- whichever backend answers (Codex/Astra reads it natively) and is deleted
+-- from ~/.revoice/tmp after the preview closes.
+hs.hotkey.bind({ "ctrl", "shift" }, "r", function()
+  local targetWindow = hs.window.frontmostWindow()
+  local style = styleForFrontmostApp()
+  local image = captureFrontmostWindow()
+  local sel, old = getSelection()
+  if not image and (not sel or sel == "") then
+    restoreClipboard(old)
+    hs.alert.show("revoice: couldn't screenshot the window — allow Screen Recording for Hammerspoon, or select the message first", 5)
+    return
+  end
+  local ok, notes = hs.dialog.textPrompt(
+    "Reply in your voice",
+    image and "What do you want to say? (rough notes, or leave empty to let it infer from the screen)"
+      or "What do you want to say? (rough notes, or leave empty to reply to the selected text)",
+    "", "Draft reply", "Cancel"
+  )
+  if ok ~= "Draft reply" then
+    restoreClipboard(old)
+    if image then os.remove(image) end
+    return
+  end
+  if targetWindow then targetWindow:focus() end
+  doRewrite(notes or "", old, nil, style, targetWindow, { reply = true, image = image, context = sel })
 end)
 
 -- menu bar: recent rewrites, styles, voice sync -------------------------------

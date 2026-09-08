@@ -19,6 +19,12 @@
  *   echo "some text" | revoice --instruction "make it shorter"
  *   echo "text" | revoice --backend claude|codex|kimi|ollama
  *
+ * Reply mode (draft a reply instead of rewriting): stdin is your rough notes
+ * (may be empty), --context is the message you're replying to, --image is a
+ * screenshot of the conversation (Codex/Astra reads it; Kimi/Ollama get it as
+ * an image part, Claude gets the path to Read).
+ *   echo "yes but not before friday" | revoice --reply --image thread.png
+ *
  * Env vars:
  *   REWRITE_PROMPT_FILE (default ~/.revoice/prompt.txt)
  *   REWRITE_BACKEND  (default claude,codex,kimi,ollama)
@@ -461,6 +467,46 @@ function loadRejectedExamples() {
     .slice(-REJECTED_EXAMPLES_MAX);
 }
 
+// Reply mode: the user message is a self-contained brief instead of a draft.
+function buildReplyBrief(notes, context, hasImage) {
+  let b =
+    "REPLY MODE (this overrides any rule above about never replying): draft the " +
+    "author's reply to a conversation. Do not rewrite the notes below; use them " +
+    "(and the conversation) to write what the author would send next. Keep the " +
+    "author's voice rules, and never invent facts, dates, or commitments the notes don't give.";
+  if (hasImage)
+    b +=
+      "\nThe attached screenshot shows the conversation the author is replying to. " +
+      "Read it carefully — the author is the person about to send the next message.";
+  if (context)
+    b += "\n\nCONVERSATION CONTEXT (what the author is replying to):\n" + context;
+  b += notes
+    ? "\n\nWHAT THE AUTHOR WANTS TO SAY (rough notes):\n" + notes
+    : "\n\nWHAT THE AUTHOR WANTS TO SAY: no notes given — infer the natural, useful reply from the conversation.";
+  b +=
+    "\n\nOutput only the reply, ready to send, in the author's voice, matching the " +
+    "channel's format (chat → short; email → a little more structure). No preamble, " +
+    "no quotes, no explanation.";
+  return b;
+}
+
+// What the model is asked to do with `text`. CLI backends (claude/codex) get
+// it appended to the system prompt; API backends (kimi/ollama) get it as the
+// user message, where a plain rewrite is just the draft itself.
+function buildTaskMessage(text, task) {
+  if (task.reply) return buildReplyBrief(text, task.context, task.images.length > 0);
+  return "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + text;
+}
+function buildUserMessage(text, task) {
+  return task.reply ? buildTaskMessage(text, task) : text;
+}
+
+function imageDataUrl(file) {
+  const ext = path.extname(file).toLowerCase().replace(".", "");
+  const mime = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" }[ext] || "image/png";
+  return `data:${mime};base64,${fs.readFileSync(file).toString("base64")}`;
+}
+
 function buildSystemPrompt(instruction) {
   let prompt = loadPrompt(ACTIVE_STYLE);
   for (const s of loadSkills()) {
@@ -524,14 +570,17 @@ function findClaude() {
   return null;
 }
 
-function rewriteWithClaude(text, instruction, ms) {
+function rewriteWithClaude(text, instruction, ms, task) {
   const bin = findClaude();
   if (!bin) return Promise.reject(new Error("claude CLI not found (npm i -g @anthropic-ai/claude-code)"));
-  let prompt = buildSystemPrompt(instruction);
-  prompt +=
-    "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" +
-    text;
+  let prompt = buildSystemPrompt(instruction) + "\n\n" + buildTaskMessage(text, task);
+  if (task.images.length) {
+    prompt +=
+      "\n\nScreenshot file(s) of the conversation — read each with your Read tool before drafting:\n" +
+      task.images.join("\n");
+  }
   const args = ["-p", prompt];
+  if (task.images.length) args.push("--allowedTools", "Read");
   if (process.env.CLAUDE_MODEL) args.push("--model", process.env.CLAUDE_MODEL);
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -584,13 +633,10 @@ function findCodex() {
 // Codex CLI (`codex exec`) — non-interactive run through the user's ChatGPT
 // subscription. The final assistant message is written to a temp file via
 // --output-last-message so progress noise on stdout never leaks into the paste.
-function rewriteWithCodex(text, instruction, ms) {
+function rewriteWithCodex(text, instruction, ms, task) {
   const bin = findCodex();
   if (!bin) return Promise.reject(new Error("codex CLI not found (npm i -g @openai/codex)"));
-  let prompt = buildSystemPrompt(instruction);
-  prompt +=
-    "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" +
-    text;
+  const prompt = buildSystemPrompt(instruction) + "\n\n" + buildTaskMessage(text, task);
   const outFile = path.join(
     os.tmpdir(),
     `revoice-codex-${process.pid}-${Date.now()}.txt`
@@ -606,6 +652,7 @@ function rewriteWithCodex(text, instruction, ms) {
   if (CODEX_MODEL) args.push("--model", CODEX_MODEL);
   if (CODEX_REASONING_EFFORT)
     args.push("-c", `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`);
+  for (const img of task.images) args.push("--image", img);
   args.push(prompt);
   return new Promise((resolve, reject) => {
     // stdin must be closed: codex appends piped stdin to the prompt.
@@ -646,10 +693,18 @@ function codexErrorSummary(stderr) {
   return (pick || "empty output").slice(0, 300);
 }
 
-async function rewriteWithKimi(text, instruction, onChunk) {
+async function rewriteWithKimi(text, instruction, onChunk, task) {
   if (!KIMI_API_KEY) throw new Error("KIMI_API_KEY not set");
   const system = buildSystemPrompt(instruction);
   const url = `${KIMI_API_URL}/chat/completions`;
+  const userText = buildUserMessage(text, task);
+  // OpenAI vision format: content becomes an array of parts when images are attached
+  const userContent = task.images.length
+    ? [
+        { type: "text", text: userText },
+        ...task.images.map((f) => ({ type: "image_url", image_url: { url: imageDataUrl(f) } })),
+      ]
+    : userText;
   let res;
   try {
     res = await fetch(url, {
@@ -662,7 +717,7 @@ async function rewriteWithKimi(text, instruction, onChunk) {
         model: KIMI_MODEL,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: text },
+          { role: "user", content: userContent },
         ],
         ...(onChunk && { stream: true }),
         ...(KIMI_TEMPERATURE !== null && { temperature: KIMI_TEMPERATURE }),
@@ -733,11 +788,30 @@ function resolveChain(spec) {
 }
 
 function parseArgs(argv) {
-  const args = { backend: null, instruction: "", style: "", stream: false, logHistory: false };
+  const args = { backend: null, instruction: "", style: "", stream: false, logHistory: false, reply: false, context: "", images: [] };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--stream") args.stream = true;
     else if (a === "--log-history") args.logHistory = true;
+    else if (a === "--reply") args.reply = true;
+    else if (a === "--context") {
+      args.context = argv[++i];
+      if (args.context === undefined) {
+        console.error("revoice: --context requires a value (the message you're replying to)");
+        process.exit(1);
+      }
+    } else if (a === "--image") {
+      const f = argv[++i];
+      if (f === undefined) {
+        console.error("revoice: --image requires a file path");
+        process.exit(1);
+      }
+      if (!fs.existsSync(f)) {
+        console.error(`revoice: --image file not found: ${f}`);
+        process.exit(1);
+      }
+      args.images.push(path.resolve(f));
+    }
     else if (a === "--history") {
       const entries = readHistory().slice(-20).reverse();
       for (const e of entries) console.log(JSON.stringify(e));
@@ -794,7 +868,8 @@ function parseArgs(argv) {
     }
     else if (a === "--help" || a === "-h") {
       console.log(
-        "Usage: echo TEXT | revoice [--backend auto|claude|codex|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills]"
+        "Usage: echo TEXT | revoice [--backend auto|claude|codex|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills]\n" +
+        "       echo NOTES | revoice --reply [--context TEXT] [--image FILE]...   (draft a reply in your voice; NOTES may be empty)"
       );
       process.exit(0);
     } else {
@@ -818,7 +893,11 @@ function readStdin() {
   });
 }
 
-async function rewriteWithOllama(text, instruction, onChunk) {
+async function rewriteWithOllama(text, instruction, onChunk, task) {
+  const user = { role: "user", content: buildUserMessage(text, task) };
+  // Ollama vision models take raw base64 (no data: prefix)
+  if (task.images.length)
+    user.images = task.images.map((f) => fs.readFileSync(f).toString("base64"));
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -828,7 +907,7 @@ async function rewriteWithOllama(text, instruction, onChunk) {
       options: { num_ctx: OLLAMA_NUM_CTX },
       messages: [
         { role: "system", content: buildSystemPrompt(instruction) },
-        { role: "user", content: text },
+        user,
       ],
     }),
   });
@@ -889,8 +968,17 @@ async function main() {
   if (args.style) loadPrompt(args.style); // validate the style up front
 
   const text = (await readStdin()).trim();
-  if (!text) {
+  const task = { reply: args.reply, context: args.context.trim(), images: args.images };
+  if (!task.reply && (task.context || task.images.length)) {
+    console.error("revoice: --context/--image only apply with --reply");
+    process.exit(1);
+  }
+  if (!text && !task.reply) {
     console.error("revoice: no input text on stdin");
+    process.exit(1);
+  }
+  if (!text && !task.context && !task.images.length) {
+    console.error("revoice: reply mode needs notes on stdin, --context, or --image");
     process.exit(1);
   }
 
@@ -910,10 +998,11 @@ async function main() {
     if (args.logHistory) {
       appendHistory({
         ts: new Date().toISOString(),
-        original: text.slice(0, 2000),
+        original: (text || task.context).slice(0, 2000),
         rewrite: out.slice(0, 2000),
         style: args.style || "",
         instruction: args.instruction || "",
+        ...(task.reply && { mode: "reply", images: task.images.length }),
         via,
       });
     }
@@ -938,10 +1027,10 @@ async function main() {
   }
 
   const runners = {
-    claude: () => rewriteWithClaude(text, args.instruction, cliBudget("CLAUDE_TIMEOUT_MS")),
-    codex: () => rewriteWithCodex(text, args.instruction, cliBudget("CODEX_TIMEOUT_MS")),
-    kimi: () => withTimeout(rewriteWithKimi(text, args.instruction, onChunk), remaining(10000), "Kimi"),
-    ollama: () => withTimeout(rewriteWithOllama(text, args.instruction, onChunk), remaining(10000), "Ollama"),
+    claude: () => rewriteWithClaude(text, args.instruction, cliBudget("CLAUDE_TIMEOUT_MS"), task),
+    codex: () => rewriteWithCodex(text, args.instruction, cliBudget("CODEX_TIMEOUT_MS"), task),
+    kimi: () => withTimeout(rewriteWithKimi(text, args.instruction, onChunk, task), remaining(10000), "Kimi"),
+    ollama: () => withTimeout(rewriteWithOllama(text, args.instruction, onChunk, task), remaining(10000), "Ollama"),
   };
 
   for (const backend of chain) {
