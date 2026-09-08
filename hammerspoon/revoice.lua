@@ -1,5 +1,5 @@
 -- revoice Hammerspoon hotkeys
--- ⌃⇧Z : rewrite selected text (auto style by app; Claude → Kimi → Ollama)
+-- ⌃⇧Z : rewrite selected text (auto style by app; Claude → Codex → Kimi → Ollama, or REWRITE_BACKEND)
 -- ⌃⇧E : rewrite selected text with a custom instruction (prompt box)
 -- ⌃⇧1 : rewrite in Founder style (direct, decisive)
 -- ⌃⇧2 : rewrite in Casual style (relaxed, friendly)

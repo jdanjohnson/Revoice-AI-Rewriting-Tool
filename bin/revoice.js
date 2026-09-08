@@ -4,8 +4,12 @@
  *
  * Backend order (auto):
  *   1. Claude Code CLI (your Claude subscription, fully promptable)
- *   2. Kimi / any OpenAI-compatible API (if KIMI_API_KEY is set)
- *   3. Ollama (local model, default: llama3.2:3b)
+ *   2. Codex CLI (your ChatGPT subscription; default model gpt-6-astra)
+ *   3. Kimi / any OpenAI-compatible API (if KIMI_API_KEY is set)
+ *   4. Ollama (local model, default: llama3.2:3b)
+ *
+ * Reorder or restrict the chain with REWRITE_BACKEND, e.g.
+ *   REWRITE_BACKEND=codex,claude,kimi,ollama   (Astra first)
  *
  * The rewrite prompt is editable: ~/.revoice/prompt.txt
  * (or REWRITE_PROMPT_FILE).
@@ -13,11 +17,13 @@
  * Usage:
  *   echo "some text" | revoice
  *   echo "some text" | revoice --instruction "make it shorter"
- *   echo "text" | revoice --backend claude|kimi|ollama
+ *   echo "text" | revoice --backend claude|codex|kimi|ollama
  *
  * Env vars:
  *   REWRITE_PROMPT_FILE (default ~/.revoice/prompt.txt)
- *   CLAUDE_BIN, CLAUDE_MODEL
+ *   REWRITE_BACKEND  (default claude,codex,kimi,ollama)
+ *   CLAUDE_BIN, CLAUDE_MODEL, CLAUDE_TIMEOUT_MS
+ *   CODEX_BIN, CODEX_MODEL (default gpt-6-astra), CODEX_REASONING_EFFORT (default low), CODEX_TIMEOUT_MS
  *   KIMI_API_URL (default https://api.moonshot.ai/v1), KIMI_API_KEY, KIMI_MODEL, KIMI_TEMPERATURE
  *   OLLAMA_URL       (default http://127.0.0.1:11434)
  *   OLLAMA_MODEL     (default llama3.2:3b)
@@ -549,6 +555,97 @@ function rewriteWithClaude(text, instruction, ms) {
   });
 }
 
+const CODEX_MODEL = (process.env.CODEX_MODEL || "gpt-6-astra").trim();
+const CODEX_REASONING_EFFORT = (process.env.CODEX_REASONING_EFFORT || "low").trim();
+
+function findCodex() {
+  if (process.env.CODEX_BIN && fs.existsSync(process.env.CODEX_BIN))
+    return process.env.CODEX_BIN;
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, ".local", "bin", "codex"),
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+  ];
+  for (const c of candidates) if (fs.existsSync(c)) return c;
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    if (!dir) continue;
+    const p = path.join(dir, "codex");
+    try {
+      if (fs.statSync(p).isFile()) {
+        fs.accessSync(p, fs.constants.X_OK);
+        return p;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// Codex CLI (`codex exec`) — non-interactive run through the user's ChatGPT
+// subscription. The final assistant message is written to a temp file via
+// --output-last-message so progress noise on stdout never leaks into the paste.
+function rewriteWithCodex(text, instruction, ms) {
+  const bin = findCodex();
+  if (!bin) return Promise.reject(new Error("codex CLI not found (npm i -g @openai/codex)"));
+  let prompt = buildSystemPrompt(instruction);
+  prompt +=
+    "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" +
+    text;
+  const outFile = path.join(
+    os.tmpdir(),
+    `revoice-codex-${process.pid}-${Date.now()}.txt`
+  );
+  const args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--sandbox", "read-only",
+    "--color", "never",
+    "--output-last-message", outFile,
+  ];
+  if (CODEX_MODEL) args.push("--model", CODEX_MODEL);
+  if (CODEX_REASONING_EFFORT)
+    args.push("-c", `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`);
+  args.push(prompt);
+  return new Promise((resolve, reject) => {
+    // stdin must be closed: codex appends piped stdin to the prompt.
+    const child = spawn(bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: os.tmpdir(),
+    });
+    let out = "", err = "";
+    const cleanup = () => {
+      try { fs.unlinkSync(outFile); } catch {}
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      cleanup();
+      reject(new Error(`codex timed out after ${ms}ms`));
+    }, ms);
+    timer.unref();
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => { clearTimeout(timer); cleanup(); reject(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      let result = "";
+      try { result = fs.readFileSync(outFile, "utf8").trim(); } catch {}
+      cleanup();
+      if (!result) result = out.trim();
+      if (code === 0 && result) resolve(result);
+      else reject(new Error(`codex exited ${code}: ${codexErrorSummary(err)}`));
+    });
+  });
+}
+
+// codex exec logs verbose INFO/WARN tracing to stderr; keep only the last ERROR line.
+function codexErrorSummary(stderr) {
+  const lines = stderr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const errs = lines.filter((l) => /^ERROR:/.test(l));
+  const pick = errs.length ? errs[errs.length - 1] : lines.filter((l) => !/ (INFO|WARN) /.test(l)).pop();
+  return (pick || "empty output").slice(0, 300);
+}
+
 async function rewriteWithKimi(text, instruction, onChunk) {
   if (!KIMI_API_KEY) throw new Error("KIMI_API_KEY not set");
   const system = buildSystemPrompt(instruction);
@@ -616,8 +713,27 @@ async function rewriteWithKimi(text, instruction, onChunk) {
   return out;
 }
 
+const BACKENDS = ["claude", "codex", "kimi", "ollama"];
+const DEFAULT_CHAIN = BACKENDS;
+
+// Resolve `--backend` (or REWRITE_BACKEND when --backend is omitted) into an
+// ordered list. "auto" expands to the default chain; a single explicit
+// backend fails hard instead of falling through.
+function resolveChain(spec) {
+  const raw = (spec || "auto").trim();
+  const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  const chain = [];
+  for (const p of parts) {
+    if (p === "auto") {
+      for (const b of DEFAULT_CHAIN) if (!chain.includes(b)) chain.push(b);
+    } else if (!chain.includes(p)) chain.push(p);
+  }
+  const explicit = parts.length === 1 && parts[0] !== "auto";
+  return { chain, explicit };
+}
+
 function parseArgs(argv) {
-  const args = { backend: "auto", instruction: "", style: "", stream: false, logHistory: false };
+  const args = { backend: null, instruction: "", style: "", stream: false, logHistory: false };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--stream") args.stream = true;
@@ -636,9 +752,15 @@ function parseArgs(argv) {
     }
     else if (a === "--backend") {
       args.backend = argv[++i];
-      if (!["auto", "claude", "kimi", "ollama"].includes(args.backend)) {
-        console.error(`revoice: invalid --backend "${args.backend}" (use auto|claude|kimi|ollama)`);
+      if (args.backend === undefined) {
+        console.error(`revoice: --backend requires a value (use auto|${BACKENDS.join("|")} or a comma-separated chain)`);
         process.exit(1);
+      }
+      for (const b of args.backend.split(",")) {
+        if (b !== "auto" && !BACKENDS.includes(b)) {
+          console.error(`revoice: invalid --backend "${args.backend}" (use auto|${BACKENDS.join("|")} or a comma-separated chain)`);
+          process.exit(1);
+        }
       }
     } else if (a === "--instruction" || a === "-i") {
       args.instruction = argv[++i];
@@ -672,7 +794,7 @@ function parseArgs(argv) {
     }
     else if (a === "--help" || a === "-h") {
       console.log(
-        "Usage: echo TEXT | revoice [--backend auto|claude|kimi|ollama] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills]"
+        "Usage: echo TEXT | revoice [--backend auto|claude|codex|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills]"
       );
       process.exit(0);
     } else {
@@ -799,52 +921,46 @@ async function main() {
     process.stdout.write(rest, () => process.exit(0));
   };
   const remaining = (min) => Math.max(deadline - Date.now(), min);
+  const cliBudget = (envName) => {
+    const parsed = Number(process.env[envName]);
+    return Math.min(remaining(10000), Number.isFinite(parsed) && parsed > 0 ? parsed : Infinity);
+  };
 
-  if (args.backend === "auto" || args.backend === "claude") {
-    try {
-      const parsedClaudeMs = Number(process.env.CLAUDE_TIMEOUT_MS);
-      const claudeMs = Math.min(
-        remaining(10000),
-        Number.isFinite(parsedClaudeMs) && parsedClaudeMs > 0 ? parsedClaudeMs : Infinity
-      );
-      emit(await rewriteWithClaude(text, args.instruction, claudeMs), "claude");
-      return;
-    } catch (e) {
-      errors.push(`claude: ${e.message}`);
-      if (args.backend === "claude") {
-        console.error(errors.join("; "));
+  const spec = args.backend !== null ? args.backend : process.env.REWRITE_BACKEND;
+  const { chain, explicit } = resolveChain(spec);
+  if (args.backend === null) {
+    for (const b of chain) {
+      if (!BACKENDS.includes(b)) {
+        console.error(`revoice: invalid REWRITE_BACKEND "${spec}" (use auto|${BACKENDS.join("|")} or a comma-separated chain)`);
         process.exit(1);
       }
     }
   }
 
-  if ((args.backend === "auto" && KIMI_API_KEY) || args.backend === "kimi") {
+  const runners = {
+    claude: () => rewriteWithClaude(text, args.instruction, cliBudget("CLAUDE_TIMEOUT_MS")),
+    codex: () => rewriteWithCodex(text, args.instruction, cliBudget("CODEX_TIMEOUT_MS")),
+    kimi: () => withTimeout(rewriteWithKimi(text, args.instruction, onChunk), remaining(10000), "Kimi"),
+    ollama: () => withTimeout(rewriteWithOllama(text, args.instruction, onChunk), remaining(10000), "Ollama"),
+  };
+
+  for (const backend of chain) {
+    // Kimi only joins an automatic chain when it's actually configured.
+    if (backend === "kimi" && !KIMI_API_KEY && !explicit) continue;
     try {
-      emit(await withTimeout(rewriteWithKimi(text, args.instruction, onChunk), remaining(10000), "Kimi"), "kimi");
+      emit(await runners[backend](), backend);
       return;
     } catch (e) {
-      errors.push(`kimi: ${e.message}`);
+      errors.push(`${backend}: ${e.message}`);
       // once partial output has been streamed, falling back would corrupt stdout
-      if (args.backend === "kimi" || streamedChars > 0) {
+      if (explicit || streamedChars > 0) {
         console.error(errors.join("; "));
         process.exit(1);
       }
     }
   }
-
-  try {
-    const out = await withTimeout(
-      rewriteWithOllama(text, args.instruction, onChunk),
-      remaining(10000),
-      "Ollama"
-    );
-    emit(out, "ollama");
-    return;
-  } catch (e) {
-    errors.push(`ollama: ${e.message}`);
-    console.error("revoice failed — " + errors.join("; "));
-    process.exit(1);
-  }
+  console.error("revoice failed — " + (errors.join("; ") || "no backend available"));
+  process.exit(1);
 }
 
 main().catch((e) => {

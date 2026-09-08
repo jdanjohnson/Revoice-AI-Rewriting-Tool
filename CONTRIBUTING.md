@@ -6,7 +6,7 @@ Thanks for your interest! Issues and PRs are welcome.
 
 The whole tool is three files, so changes are easy to review:
 
-- `bin/revoice.js` — the CLI (Node, zero npm dependencies). Prompt composition, backends (Claude Code CLI, OpenAI-compatible APIs, Ollama), history, and the learning loop.
+- `bin/revoice.js` — the CLI (Node, zero npm dependencies). Prompt composition, backends (Claude Code CLI, Codex CLI, OpenAI-compatible APIs, Ollama), history, and the learning loop.
 - `hammerspoon/revoice.lua` — macOS hotkeys, selection capture, liquid-glass HUD, preview popover, menu bar.
 - `install.sh` — installer and config migration.
 

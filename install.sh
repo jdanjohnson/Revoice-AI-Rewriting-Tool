@@ -136,7 +136,8 @@ fi
 echo
 echo "Done. Next steps:"
 echo "  1. Open Hammerspoon, grant Accessibility permission, and click 'Reload Config'."
-echo "  2. Primary backend is the Claude Code CLI (npm i -g @anthropic-ai/claude-code; run 'claude' once to sign in)."
+echo "  2. Backends (any one works): Claude Code CLI (npm i -g @anthropic-ai/claude-code; run 'claude' once) or Codex / GPT-6 Astra (npm i -g @openai/codex; run 'codex' once)."
+echo "     Want Astra first? Put REWRITE_BACKEND=codex,claude,kimi,ollama in $DEST/env."
 echo "  3. (Optional) Kimi backend: put KIMI_API_KEY=... in $DEST/env.  (Optional local fallback) brew install ollama && ollama pull llama3.2:3b"
 echo "  4. Edit the rewrite prompt anytime: $DEST/prompt.txt"
 echo "  5. Want rewrites in YOUR voice? Paste samples of your real writing (separated by --- lines) into $DEST/voice-samples.txt"

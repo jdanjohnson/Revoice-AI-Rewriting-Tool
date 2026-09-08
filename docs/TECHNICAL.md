@@ -9,8 +9,10 @@ Hammerspoon hotkey
   → copies selection (preserves your clipboard)
   → pipes it to the revoice CLI (Node, zero dependencies), which tries in order:
       1. Claude Code CLI (your Claude subscription — your own prompt)
-      2. Kimi / any OpenAI-compatible API (if KIMI_API_KEY is set — your own prompt)
-      3. Ollama at localhost:11434 (local, default model llama3.2:3b — your own prompt)
+      2. Codex CLI (your ChatGPT subscription, default model gpt-6-astra — your own prompt)
+      3. Kimi / any OpenAI-compatible API (if KIMI_API_KEY is set — your own prompt)
+      4. Ollama at localhost:11434 (local, default model llama3.2:3b — your own prompt)
+     (reorder with REWRITE_BACKEND, e.g. codex,claude,kimi,ollama)
   → streams the rewrite into the liquid-glass HUD
   → shows a preview popover — ⏎ pastes over the selection, esc keeps the original
   → restores your clipboard either way
@@ -58,19 +60,24 @@ Each style is an editable prompt file in `~/.revoice/styles/` (`founder.txt`, `c
 
 ## Backends
 
-In `auto` mode (the hotkeys) the CLI tries Claude → Kimi → Ollama; the HUD shows which one handled the rewrite. An explicit `--backend X` never contacts another provider.
+In `auto` mode (the hotkeys) the CLI tries Claude → Codex → Kimi → Ollama; the HUD shows which one handled the rewrite. An explicit `--backend X` never contacts another provider.
+
+`REWRITE_BACKEND` (env or `~/.revoice/env`) changes the default chain used by the hotkeys. It accepts a single backend (`codex` — strict, no fallback), `auto`, or a comma-separated chain (`codex,claude,kimi,ollama` — GPT-6 Astra first, then the usual fallbacks). `--backend` on the command line takes the same values and overrides it. Kimi is skipped in a chain when `KIMI_API_KEY` is unset.
 
 - **Claude**: `npm i -g @anthropic-ai/claude-code`, then run `claude` once to sign in. Options: `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_MS`.
+- **Codex / GPT-6 Astra**: `npm i -g @openai/codex` (≥ 0.153), then run `codex` once to sign in with your ChatGPT account (Plus/Pro/Business). revoice runs `codex exec --ephemeral --sandbox read-only --model gpt-6-astra -c model_reasoning_effort="low"` and reads the final message via `--output-last-message`, so Codex's progress output never reaches the paste. Options: `CODEX_BIN`, `CODEX_MODEL` (default `gpt-6-astra`), `CODEX_REASONING_EFFORT` (default `low` — raise to `medium`/`high` for long strategy docs, at the cost of latency), `CODEX_TIMEOUT_MS`. Prefer the API instead? Astra is also reachable through the OpenAI-compatible backend below: `KIMI_API_URL=https://api.openai.com/v1`, `KIMI_API_KEY=sk-...`, `KIMI_MODEL=gpt-6-astra` (paid per token, but streams into the HUD).
 - **Kimi / any OpenAI-compatible API**: put `KIMI_API_KEY=sk-...` (from platform.moonshot.ai) in `~/.revoice/env` — that file is loaded by the CLI even when launched from the hotkey. Options: `KIMI_MODEL` (default `moonshot-v1-auto`), `KIMI_API_URL` (point it at any OpenAI-compatible endpoint), `KIMI_TEMPERATURE` (unset by default — Moonshot's `kimi-k*` models reject non-default temperatures).
 - **Ollama (local/free)**: `brew install ollama && ollama pull llama3.2:3b` (~2 GB, fast on Apple Silicon). Options: `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` (default 8192).
 
 ## CLI usage (standalone)
 
 ```bash
-echo "some text" | revoice                        # Claude → Kimi → Ollama
+echo "some text" | revoice                        # Claude → Codex → Kimi → Ollama (or REWRITE_BACKEND)
 echo "some text" | revoice -i "make it formal"    # custom instruction
 echo "some text" | revoice --style casual         # style prompt (founder|casual|professional|concise|any styles/*.txt)
 echo "some text" | revoice --backend claude       # Claude only
+echo "some text" | revoice --backend codex        # Codex / GPT-6 Astra only
+echo "some text" | revoice --backend codex,ollama # custom chain: Astra, then local fallback
 echo "some text" | revoice --backend kimi         # Kimi only
 echo "some text" | revoice --backend ollama       # local only
 revoice --skills                                  # list loaded agent skills
@@ -84,11 +91,11 @@ revoice --mark-last accepted|rejected             # record the outcome of the la
 
 May also live in `~/.revoice/env` (quote values that contain ` #`):
 
-`REWRITE_PROMPT_FILE`, `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_MS`, `KIMI_API_URL`, `KIMI_API_KEY`, `KIMI_MODEL`, `KIMI_TEMPERATURE`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `REWRITE_TIMEOUT_MS` (default 25000), `VOICE_SAMPLES_FILE`, `VOICE_MAX_CHARS`, `REWRITE_STYLES_DIR`, `REWRITE_SKILLS_DIR`, `SKILLS_MAX_CHARS`, `REWRITE_HISTORY_FILE`, `REJECTED_EXAMPLES_MAX`.
+`REWRITE_PROMPT_FILE`, `REWRITE_BACKEND`, `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_MS`, `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_TIMEOUT_MS`, `KIMI_API_URL`, `KIMI_API_KEY`, `KIMI_MODEL`, `KIMI_TEMPERATURE`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `REWRITE_TIMEOUT_MS` (default 25000), `VOICE_SAMPLES_FILE`, `VOICE_MAX_CHARS`, `REWRITE_STYLES_DIR`, `REWRITE_SKILLS_DIR`, `SKILLS_MAX_CHARS`, `REWRITE_HISTORY_FILE`, `REJECTED_EXAMPLES_MAX`.
 
 ## Security & privacy
 
-- The hotkey sends whatever text is selected to a remote API (Claude or Kimi) unless you use `--backend ollama`. Don't trigger it on passwords, keys, or other secrets — there is no per-invocation confirmation by design (it's a one-keystroke tool).
+- The hotkey sends whatever text is selected to a remote API (Claude, OpenAI/Codex, or Kimi) unless you use `--backend ollama`. Don't trigger it on passwords, keys, or other secrets — there is no per-invocation confirmation by design (it's a one-keystroke tool).
 - Endpoint/key env vars are only read from your own environment or `~/.revoice/env`; only set them to endpoints you trust. Use `--backend ollama` to keep text fully local.
 - Rewrite history, voice samples, and your prompt live only in `~/.revoice/` on your machine.
 
@@ -96,7 +103,7 @@ May also live in `~/.revoice/env` (quote values that contain ` #`):
 
 - macOS only: the global hotkeys, selection capture, and paste rely on Hammerspoon. The CLI itself is portable Node and works anywhere.
 - Works in any app that supports ⌘C/⌘V (Mail, Slack, browsers, editors).
-- Claude Code CLI can't stream, so Claude rewrites show the animated HUD and then pop straight into the preview; Kimi/Ollama stream live.
+- The Claude Code and Codex CLIs can't stream, so their rewrites show the animated HUD and then pop straight into the preview; Kimi/Ollama stream live. Both CLIs also add a few seconds of startup per rewrite.
 
 ## Testing
 
