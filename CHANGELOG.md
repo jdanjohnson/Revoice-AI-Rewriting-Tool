@@ -11,9 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Codex / GPT-6 Astra backend** (`--backend codex`): rewrites through your ChatGPT subscription via the Codex CLI (`codex exec`, default model `gpt-6-astra`, `model_reasoning_effort=low`). Options: `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_TIMEOUT_MS`.
 - **Reply mode** (⌃⇧R): screenshots the frontmost window, asks what you want to say, and drafts the reply in your voice from the on-screen conversation plus your notes (empty notes = infer). Lands in the usual preview. CLI: `revoice --reply [--context TEXT] [--image FILE]...` with notes on stdin. Codex/Astra reads the screenshot natively (`--image`); Claude gets the path with `--allowedTools Read`; Kimi/Ollama receive it as an image part (vision model required). Needs the Screen Recording permission for Hammerspoon; screenshots are deleted from `~/.revoice/tmp` after the run.
 - **`REWRITE_BACKEND`** setting (env or `~/.revoice/env`) to choose the default backend or reorder the fallback chain used by the hotkeys, e.g. `REWRITE_BACKEND=codex,claude,kimi,ollama` makes Astra the default. `--backend` accepts the same comma-separated chains.
+- **`revoice --doctor`**: shows the effective backend chain, where `codex`/`claude` resolve (or why not), Kimi key state, Ollama target, and the `PATH` the CLI sees. Exit 0 when at least one non-Ollama backend is usable.
 
 ### Changed
 - Automatic chain is now Claude → Codex → Kimi → Ollama (Codex is skipped instantly when the CLI isn't installed).
+- In `~/.revoice/env`, the last assignment of a key now wins (so `echo KEY=v >> ~/.revoice/env` overrides an earlier line). Real environment variables still take precedence over the file.
+
+### Fixed
+- Hotkeys fell back to Ollama even when `codex`/`claude` worked in the terminal: Hammerspoon launches the CLI with a bare `PATH`, so npm/nvm/volta-installed binaries were invisible. The Hammerspoon module now resolves your login-shell `PATH` (plus `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`) and passes it to every CLI task.
 
 ## [1.0.0] - 2026-08-22
 

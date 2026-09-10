@@ -45,18 +45,22 @@ const CONFIG_DIR = path.join(os.homedir(), ".revoice");
 
 // Load ~/.revoice/env (KEY=VALUE lines) so settings like KIMI_API_KEY
 // reach the CLI even when launched from Hammerspoon (no shell profile there).
+// Real environment variables win over the file; within the file the last
+// assignment of a key wins, so `echo KEY=v >> ~/.revoice/env` overrides.
 try {
   const envFile = path.join(CONFIG_DIR, "env");
+  const fromFile = {};
   for (const line of fs.readFileSync(envFile, "utf8").split(/\r?\n/)) {
     const m = line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/);
-    if (m && process.env[m[1]] === undefined) {
-      let v = m[2].trim();
-      const q = v.match(/^(["'])([\s\S]*?)\1\s*(?:#.*)?$/);
-      if (q) v = q[2];
-      else v = v.replace(/\s+#.*$/, "").trim();
-      process.env[m[1]] = v;
-    }
+    if (!m) continue;
+    let v = m[2].trim();
+    const q = v.match(/^(["'])([\s\S]*?)\1\s*(?:#.*)?$/);
+    if (q) v = q[2];
+    else v = v.replace(/\s+#.*$/, "").trim();
+    fromFile[m[1]] = v;
   }
+  for (const [k, v] of Object.entries(fromFile))
+    if (process.env[k] === undefined) process.env[k] = v;
 } catch {}
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
@@ -854,6 +858,17 @@ function parseArgs(argv) {
       }
       console.log(BUILTIN_STYLES[name] + "\n\n" + PROMPT_RULES);
       process.exit(0);
+    } else if (a === "--doctor") {
+      const { chain } = resolveChain(process.env.REWRITE_BACKEND);
+      const codex = findCodex();
+      const claude = findClaude();
+      console.log(`backend chain: ${chain.join(" → ")}  (REWRITE_BACKEND=${process.env.REWRITE_BACKEND || "<unset>"})`);
+      console.log(`codex:  ${codex ? `${codex}  (model ${CODEX_MODEL})` : "NOT FOUND — npm i -g @openai/codex, or set CODEX_BIN in ~/.revoice/env"}`);
+      console.log(`claude: ${claude || "NOT FOUND — npm i -g @anthropic-ai/claude-code, or set CLAUDE_BIN in ~/.revoice/env"}`);
+      console.log(`kimi:   ${process.env.KIMI_API_KEY ? `key set  (${KIMI_API_URL}, model ${KIMI_MODEL})` : "no KIMI_API_KEY"}`);
+      console.log(`ollama: ${OLLAMA_URL}  (model ${OLLAMA_MODEL})`);
+      console.log(`PATH:   ${process.env.PATH || ""}`);
+      process.exit(codex || claude || process.env.KIMI_API_KEY ? 0 : 1);
     } else if (a === "--skills") {
       const skills = loadSkills();
       if (!skills.length) console.log(`No skills loaded (put .md files in ${SKILLS_DIR})`);
@@ -868,7 +883,7 @@ function parseArgs(argv) {
     }
     else if (a === "--help" || a === "-h") {
       console.log(
-        "Usage: echo TEXT | revoice [--backend auto|claude|codex|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills]\n" +
+        "Usage: echo TEXT | revoice [--backend auto|claude|codex|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills] [--doctor]\n" +
         "       echo NOTES | revoice --reply [--context TEXT] [--image FILE]...   (draft a reply in your voice; NOTES may be empty)"
       );
       process.exit(0);
