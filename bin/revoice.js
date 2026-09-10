@@ -656,7 +656,9 @@ function rewriteWithCodex(text, instruction, ms, task) {
   if (CODEX_MODEL) args.push("--model", CODEX_MODEL);
   if (CODEX_REASONING_EFFORT)
     args.push("-c", `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`);
-  for (const img of task.images) args.push("--image", img);
+  // `--image <FILE>...` is greedy in codex's clap parser and would swallow the
+  // prompt positional; the `--image=FILE` form binds exactly one value.
+  for (const img of task.images) args.push(`--image=${img}`);
   args.push(prompt);
   return new Promise((resolve, reject) => {
     // stdin must be closed: codex appends piped stdin to the prompt.
