@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Hotkeys fell back to Ollama even when `codex`/`claude` worked in the terminal: Hammerspoon launches the CLI with a bare `PATH`, so npm/nvm/volta-installed binaries were invisible. The Hammerspoon module now resolves your login-shell `PATH` (plus `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`) and passes it to every CLI task.
+- Reply mode with Codex failed with `codex exited 1: No prompt provided via stdin.`: `codex exec --image <FILE>...` is greedy and swallowed the prompt argument. Images are now passed as `--image=<FILE>`.
 
 ## [1.0.0] - 2026-08-22
 
