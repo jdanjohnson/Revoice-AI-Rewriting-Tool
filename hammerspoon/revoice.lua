@@ -28,6 +28,26 @@ local function findNode()
   return nil
 end
 
+-- Hammerspoon runs with a bare PATH (/usr/bin:/bin:...), so the CLI would not
+-- find `codex`/`claude` installed via npm/nvm/volta. Resolve the user's login
+-- shell PATH once and hand it to every CLI task.
+local shellPath
+local function taskEnv()
+  if not shellPath then
+    local out = hs.execute("echo -n \"$PATH\"", true)
+    shellPath = (out and out:gsub("%s+$", "") or "")
+    if shellPath == "" then shellPath = os.getenv("PATH") or "/usr/bin:/bin" end
+    for _, extra in ipairs({ "/opt/homebrew/bin", "/usr/local/bin", os.getenv("HOME") .. "/.local/bin" }) do
+      if not shellPath:find(extra, 1, true) then shellPath = shellPath .. ":" .. extra end
+    end
+  end
+  local env = { PATH = shellPath, HOME = os.getenv("HOME") }
+  for _, k in ipairs({ "USER", "LANG", "TMPDIR", "SHELL" }) do
+    if os.getenv(k) then env[k] = os.getenv(k) end
+  end
+  return env
+end
+
 -- context awareness: pick a tone from the frontmost app for plain ⌃⇧Z ------
 -- (override or extend in ~/.revoice/app-styles.json:
 --   { "com.tinyspeck.slackmacgap": "casual", "com.apple.mail": "professional" })
@@ -255,6 +275,7 @@ local function markLast(outcome, andThen)
   local task = hs.task.new(node, function()
     if andThen then andThen() end
   end, { CLI, "--mark-last", outcome })
+  if task then task:setEnvironment(taskEnv()) end
   if task and task:start() then return end
   if andThen then andThen() end
 end
@@ -511,6 +532,7 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
     hs.alert.show("revoice: failed to launch CLI", 4)
     return
   end
+  task:setEnvironment(taskEnv())
   task:setInput(sel or "")
   if not task:start() then
     hudStop()

@@ -104,6 +104,7 @@ echo "some text" | revoice --backend codex,ollama # custom chain: Astra, then lo
 echo "some text" | revoice --backend kimi         # Kimi only
 echo "some text" | revoice --backend ollama       # local only
 revoice --skills                                  # list loaded agent skills
+revoice --doctor                                  # which backends resolve, effective chain, PATH the CLI sees
 echo "some text" | revoice --stream               # stream output chunks as they arrive (Kimi/Ollama)
 echo "some text" | revoice --log-history          # record the rewrite in ~/.revoice/history.jsonl
 revoice --history                                 # print recent rewrites (newest first)
@@ -116,7 +117,7 @@ echo "" | revoice --reply --context "$(pbpaste)"                     # reply to 
 
 ## Environment variables
 
-May also live in `~/.revoice/env` (quote values that contain ` #`):
+May also live in `~/.revoice/env` (quote values that contain ` #`). Real environment variables win over the file; within the file the last assignment of a key wins, so appending with `>>` overrides. Hammerspoon passes your login-shell `PATH` (plus `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`) to the CLI so npm/nvm-installed `codex`/`claude` are found from the hotkeys.
 
 `REWRITE_PROMPT_FILE`, `REWRITE_BACKEND`, `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_MS`, `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_TIMEOUT_MS`, `KIMI_API_URL`, `KIMI_API_KEY`, `KIMI_MODEL`, `KIMI_TEMPERATURE`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `REWRITE_TIMEOUT_MS` (default 25000), `VOICE_SAMPLES_FILE`, `VOICE_MAX_CHARS`, `REWRITE_STYLES_DIR`, `REWRITE_SKILLS_DIR`, `SKILLS_MAX_CHARS`, `REWRITE_HISTORY_FILE`, `REJECTED_EXAMPLES_MAX`.
 
@@ -125,6 +126,10 @@ May also live in `~/.revoice/env` (quote values that contain ` #`):
 - The hotkey sends whatever text is selected — and, for ⌃⇧R, a screenshot of the frontmost window — to a remote API (Claude, OpenAI/Codex, or Kimi) unless you use `--backend ollama`. Screenshots are only taken when you press ⌃⇧R and are deleted from `~/.revoice/tmp` after the run. Don't trigger it on passwords, keys, or other secrets — there is no per-invocation confirmation by design (it's a one-keystroke tool).
 - Endpoint/key env vars are only read from your own environment or `~/.revoice/env`; only set them to endpoints you trust. Use `--backend ollama` to keep text fully local.
 - Rewrite history, voice samples, and your prompt live only in `~/.revoice/` on your machine.
+
+## Troubleshooting
+
+**HUD says `ollama` (or the wrong backend) but the terminal works.** The hotkeys run the same CLI, but under Hammerspoon's environment. Run `revoice --doctor` in Terminal: it prints the effective chain, where `codex`/`claude` were found, and the `PATH` in use. Then Hammerspoon menu → Reload Config (the module caches your login-shell `PATH` at load). If the binaries live somewhere unusual, set `CODEX_BIN=/full/path/to/codex` / `CLAUDE_BIN=...` in `~/.revoice/env`. If `~/.revoice/env` has several `REWRITE_BACKEND=` lines, the last one wins.
 
 ## Limitations
 
