@@ -156,6 +156,10 @@ check("flags: two chips rendered in order",
   S.html and S.html:match('<div class="flags">.-</div>'))
 check("flags: chips sit between the rewrite and the key hints", S.html and (S.html:find('class="flags"', 1, true) > S.html:find('class="body"', 1, true)) and (S.html:find('class="flags"', 1, true) < S.html:find('class="hints"', 1, true)), S.html and S.html:sub(-400))
 eq("flags: card grows by one chip row (36px) for two flags", S.frame and plainH and (S.frame.h - plainH), 36)
+reset(); S.hotkeys["z"]()
+S.tasks[1].done(0, string.rep("long line of rewritten text that fills the card\n", 60), "via:openai\nflag:a\nflag:b\nflag:c\n")
+for _, fn in ipairs(S.deferred) do fn() end
+eq("flags: chip rows are added on top of the 60% screen cap (never clipped)", S.frame and S.frame.h, 150 + 72)  -- stub text height 40 -> 150 floor; 3 flags = 2 rows
 
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -360,7 +360,7 @@ local function previewShow(result, ctx)
   local textH = measure:minimumTextSize(styled).h
   measure:delete()
   local flags = ctx.flags or {}
-  local h = math.min(math.max(textH * 1.1 + 96, 150) + 36 * math.ceil(#flags / 2), screen.h * 0.6)
+  local h = math.min(math.max(textH * 1.1 + 96, 150), screen.h * 0.6) + 36 * math.ceil(#flags / 2)
   local title = ctx.extra and ctx.extra.reply and "reply ready" or "rewrite ready"
   if ctx.style and ctx.style ~= "" then title = title .. " · " .. ctx.style end
   if ctx.via then title = title .. " · " .. ctx.via end

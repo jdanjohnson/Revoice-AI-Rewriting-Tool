@@ -560,7 +560,7 @@ function cleanOllamaOutput(out, text, task) {
   if (!OLLAMA_PREAMBLE.test(text)) o = o.replace(OLLAMA_PREAMBLE, "");
   if (/^["“][^"“”]*["”]$/s.test(o) && !/^["“]/.test(text)) o = o.slice(1, -1).trim();
   if (!o) throw new Error("Ollama returned empty result");
-  if (!task.reply && normalizeText(o) === normalizeText(text))
+  if (!task.reply && normalizeText(splitFlags(o, text).rewrite) === normalizeText(text))
     throw new Error(`Ollama (${OLLAMA_MODEL}) returned the draft unchanged`);
   return o;
 }
@@ -580,10 +580,15 @@ const FLAGS_INSTRUCTION =
   "this form, each ambiguity as a short phrase:\nFLAGS: <ambiguity> | <ambiguity>\n" +
   "If nothing could change the meaning, add nothing after the rewrite.";
 const FLAGS_LINE = /^\s*FLAGS?\s*:\s*(.*)$/i;
+// A partial line that could still turn into a FLAGS_LINE match
+const FLAGS_PREFIX = /^\s*(?:F|FL|FLA|FLAG|FLAGS)?\s*$/i;
+// If the draft itself has a `Flags:` line, the model is preserving content, not flagging.
+const draftHasFlagsLine = (draft) => (draft || "").split("\n").some((l) => FLAGS_LINE.test(l));
 
-function splitFlags(out) {
+function splitFlags(out, draft) {
+  if (draftHasFlagsLine(draft)) return { rewrite: out, flags: [] };
   const lines = out.split("\n");
-  const i = lines.findIndex((l) => FLAGS_LINE.test(l));
+  const i = lines.findLastIndex((l) => FLAGS_LINE.test(l));
   if (i < 0) return { rewrite: out, flags: [] };
   const tail = [lines[i].match(FLAGS_LINE)[1], ...lines.slice(i + 1)].join("\n");
   const flags = tail
@@ -1089,8 +1094,11 @@ async function main() {
   // Streamed text is forwarded line by line; a line that starts like `FLAGS:` (or could still
   // become one) is held back so the flags never reach stdout/the HUD.
   let held = "", lineStart = true, flagsSeen = false;
+  const resetStream = () => { held = ""; lineStart = true; flagsSeen = false; };
+  const flagsOff = draftHasFlagsLine(text);
   const onChunk = args.stream
     ? (delta) => {
+        if (flagsOff) return flush(delta);
         if (flagsSeen) return;
         held += delta;
         let nl;
@@ -1101,7 +1109,7 @@ async function main() {
           held = held.slice(nl + 1);
           lineStart = true;
         }
-        const couldBeFlags = lineStart && (FLAGS_LINE.test(held) || "FLAGS:".startsWith(held.trimStart().toUpperCase()));
+        const couldBeFlags = lineStart && (FLAGS_LINE.test(held) || FLAGS_PREFIX.test(held));
         if (held && !couldBeFlags) {
           flush(held);
           held = "";
@@ -1110,7 +1118,7 @@ async function main() {
       }
     : null;
   const emit = (raw, via) => {
-    const { rewrite: out, flags } = splitFlags(raw);
+    const { rewrite: out, flags } = splitFlags(raw, text);
     if (via) console.error(`via:${via}`);
     for (const f of flags) console.error(`flag:${f}`);
     if (args.logHistory) {
@@ -1164,6 +1172,7 @@ async function main() {
     if (backend === "kimi" && !KIMI_API_KEY && !explicit) continue;
     if (backend === "ollama" && errors.length)
       console.error(`revoice: ${errors.join("; ")} — falling back to local Ollama (${OLLAMA_MODEL})`);
+    resetStream();
     try {
       emit(await runners[backend](), backend);
       return;

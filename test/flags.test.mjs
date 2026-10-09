@@ -25,10 +25,10 @@ const srv = spawn(process.execPath, [path.join(HERE, "fake-servers.mjs"), T], { 
 await new Promise((res) => srv.stdout.on("data", (d) => /ready/.test(String(d)) && res()));
 
 const env = { HOME, PATH: process.env.PATH, OPENAI_API_URL: "http://127.0.0.1:4714/v1", OPENAI_API_KEY: "sk-test", REWRITE_BACKEND: "openai" };
-function run(reply, args = []) {
+function run(reply, args = [], input = "send it to them by friday", extraEnv = {}) {
   fs.rmSync(LOG, { force: true });
   fs.writeFileSync(path.join(T, "openai.reply"), reply);
-  const r = spawnSync(process.execPath, [CLI, ...args], { input: "send it to them by friday", env, encoding: "utf8" });
+  const r = spawnSync(process.execPath, [CLI, ...args], { input, env: { ...env, ...extraEnv }, encoding: "utf8" });
   return { code: r.status, out: r.stdout, err: r.stderr, flags: r.stderr.split("\n").filter((l) => l.startsWith("flag:")).map((l) => l.slice(5)) };
 }
 let pass = 0, fail = 0;
@@ -77,6 +77,34 @@ body = "Note the FLAGS:\n";  // 16 chars: chunk 1 = "Note the", chunk 2 = " FLAG
 eq("fixture: chunk boundary right before ' FLAGS:'", splitAt(body), body.indexOf(" FLAGS:"));
 r = run(body, ["--stream"]);
 eq("stream: a chunk that starts with ' FLAGS:' mid-line is text, not flags", [r.out, r.flags], ["Note the FLAGS:\n", []]);
+// review: `FLAGS :` / `FLAG :` split right before the colon must still be held back
+body = "Done.\nFLAGS : who owns?";   // 23 chars -> chunk 1 ends with "FLAGS "
+eq("fixture: boundary after 'FLAGS '", body.slice(0, splitAt(body)), "Done.\nFLAGS ");
+r = run(body, ["--stream"]);
+eq("stream: 'FLAGS :' split before the colon is held back", [r.out, r.flags], ["Done.\n", ["who owns?"]]);
+body = "Done.\nFLAG : who?";          // 17 chars -> chunk 1 = "Done.\nFLA", chunk 2 = "G : who?"
+r = run(body, ["--stream"]);
+eq("stream: singular 'FLAG :' split mid-word is held back", [r.out, r.flags], ["Done.\n", ["who?"]]);
+// review: a draft that itself has a Flags: line is content, not metadata — never stripped
+const RN = "Release notes:\nFlags: search_v2 enabled\nShip tomorrow.";
+r = run(RN, [], RN);
+eq("draft with its own Flags: line -> output untouched, no flags", [r.out, r.flags], [RN, []]);
+r = run(RN, ["--stream"], RN);
+eq("draft with its own Flags: line -> streamed untouched", [r.out, r.flags], [RN, []]);
+r = run("Release notes:\nFlags: search_v2 enabled\nShip tomorrow.\nFLAGS: which release?");
+eq("rewrite containing a Flags: line + real trailing FLAGS -> only the last line is metadata", [r.out, r.flags], ["Release notes:\nFlags: search_v2 enabled\nShip tomorrow.", ["which release?"]]);
+// review: Ollama full prompt — an unchanged draft + FLAGS line is still an echo
+fs.writeFileSync(path.join(T, "ollama.reply"), "send it to them by friday\nFLAGS: who is them");
+r = run("", [], undefined, { REWRITE_BACKEND: "ollama", OLLAMA_URL: "http://127.0.0.1:4711", OLLAMA_PROMPT: "full" });
+eq("ollama full: draft + FLAGS line -> rejected as unchanged (exit 1, empty stdout)", [r.code, r.out, /returned the draft unchanged/.test(r.err)], [1, "", true]);
+fs.writeFileSync(path.join(T, "ollama.reply"), "Send it over by Friday.\nFLAGS: who is them");
+r = run("", [], undefined, { REWRITE_BACKEND: "ollama", OLLAMA_URL: "http://127.0.0.1:4711", OLLAMA_PROMPT: "full" });
+eq("ollama full: real rewrite + FLAGS line -> stripped and reported", [r.code, r.out, r.flags], [0, "Send it over by Friday.", ["who is them"]]);
+// review: a stream that dies while "F" is held back must not leak into the fallback backend's stream
+fs.writeFileSync(path.join(T, "openai.truncate"), "");
+r = run("FX", ["--stream"], undefined, { REWRITE_BACKEND: "openai,kimi", KIMI_API_KEY: "k", KIMI_API_URL: "http://127.0.0.1:4713/v1" });
+fs.rmSync(path.join(T, "openai.truncate"));
+eq("stream: held 'F' from a failed openai stream is dropped before the kimi fallback streams", [r.code, r.out, /via:kimi/.test(r.err)], [0, "KIMI: send it to them by friday", true]);
 body = "Short.\nFLAGS: x";
 r = run(body, ["--stream"]);
 eq("stream: FLAGS delivered in a later chunk than the rewrite is still caught", [r.out, r.flags], ["Short.\n", ["x"]]);
