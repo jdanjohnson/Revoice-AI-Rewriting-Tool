@@ -86,11 +86,11 @@ eq("B6 --help mentions --doctor", r.out[0].includes("[--doctor]"), true);
 
 // C: forced codex with bare PATH fails hard (no silent ollama) — explicit single backend
 h = mk("REWRITE_BACKEND=codex\n");
-const c = spawnSync("node", [CLI], { input: "hi", env: { HOME: h, PATH: "/usr/bin:/bin" }, encoding: "utf8" });
+const c = spawnSync(process.execPath, [CLI], { input: "hi", env: { HOME: h, PATH: "/usr/bin:/bin" }, encoding: "utf8" });
 eq("C1 forced codex + bare PATH → hard error mentioning codex not found", [c.status !== 0, /codex CLI not found/.test(c.stderr)], [true, true]);
 // C2: chain codex,ollama with bare PATH and unreachable ollama → error names ollama (fell through)
 h = mk("REWRITE_BACKEND=codex,ollama\nOLLAMA_URL=http://127.0.0.1:1\n");
-const c2 = spawnSync("node", [CLI], { input: "hi", env: { HOME: h, PATH: "/usr/bin:/bin" }, encoding: "utf8" });
+const c2 = spawnSync(process.execPath, [CLI], { input: "hi", env: { HOME: h, PATH: "/usr/bin:/bin" }, encoding: "utf8" });
 eq("C2 chain falls through codex→ollama on bare PATH", [c2.status !== 0, /codex/.test(c2.stderr) && /ollama/i.test(c2.stderr)], [true, true]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
