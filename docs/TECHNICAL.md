@@ -139,4 +139,4 @@ May also live in `~/.revoice/env` (quote values that contain ` #`). Real environ
 
 ## Testing
 
-The CLI is fully testable on Linux without macOS or real API keys — see [CONTRIBUTING.md](../CONTRIBUTING.md) and `.agents/skills/testing-cli/SKILL.md`. `test/fake-ollama-server.js` provides a local fake Ollama for offline testing.
+`npm test` runs the full suite (CLI against fake codex/claude/Kimi/Ollama, plus the Hammerspoon module under a stub `hs`) on Linux with no API keys — see [CONTRIBUTING.md](../CONTRIBUTING.md). CI runs it on Node 18/20/22. `test/fake-ollama-server.js` is a standalone fake Ollama for poking at the CLI by hand.
