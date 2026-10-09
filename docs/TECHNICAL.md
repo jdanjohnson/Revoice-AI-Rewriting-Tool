@@ -16,6 +16,7 @@ Hammerspoon hotkey
      (reorder with REWRITE_BACKEND, e.g. codex,claude,kimi,ollama)
   → streams the rewrite into the liquid-glass HUD
   → shows a preview popover — ⏎ pastes over the selection, esc keeps the original
+    (ambiguities the model flagged appear as ⚑ chips under the text; they are never pasted)
   → restores your clipboard either way
 ```
 
@@ -139,6 +140,7 @@ May also live in `~/.revoice/env` (quote values that contain ` #`). Real environ
 
 - macOS only: the global hotkeys, selection capture, and paste rely on Hammerspoon. The CLI itself is portable Node and works anywhere.
 - Works in any app that supports ⌘C/⌘V (Mail, Slack, browsers, editors).
+- **Ambiguity flags.** The system prompt asks the model to append one `FLAGS: a | b` line only when the draft could materially be read two ways. The CLI strips that line from stdout (in `--stream` mode a line that starts like `FLAGS:` is held back, so it never reaches the HUD) and prints each flag on stderr as `flag:<text>`; Hammerspoon turns those into amber chips in the preview. `FLAGS: none`, bullets and `|` separators are all accepted; Ollama's compact prompt doesn't ask for flags.
 - The Claude Code and Codex CLIs can't stream, so their rewrites show the animated HUD and then pop straight into the preview; OpenAI/Kimi stream live; Ollama is buffered (its output is cleaned and checked before anything is shown). Both CLIs also add a few seconds of startup per rewrite.
 
 ## Testing

@@ -281,7 +281,13 @@ local function markLast(outcome, andThen)
 end
 
 -- rewrite preview popover: a liquid-glass card ---------------------------------
-local function previewHTML(result, title)
+local function previewHTML(result, title, flags)
+  local flagHTML = ""
+  if flags and #flags > 0 then
+    local chips = {}
+    for _, f in ipairs(flags) do chips[#chips + 1] = '<span class="flag">⚑ ' .. htmlEscape(f) .. '</span>' end
+    flagHTML = '<div class="flags">' .. table.concat(chips) .. '</div>'
+  end
   return [[<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 ]] .. GLASS_CSS .. [[
 .glass{display:flex;flex-direction:column;padding:16px 20px 12px}
@@ -290,6 +296,9 @@ local function previewHTML(result, title)
 .body{color:rgba(255,255,255,.96);font-size:14px;line-height:1.45;
   flex:1;min-height:0;overflow:hidden;white-space:pre-wrap;
   word-wrap:break-word;text-shadow:0 1px 4px rgba(30,10,80,.35)}
+.flags{flex:none;display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.flag{color:#ffe3a3;font-size:11px;padding:3px 10px;border-radius:999px;
+  background:rgba(255,190,70,.16);border:1px solid rgba(255,200,90,.45)}
 .hints{flex:none;display:flex;gap:8px;margin-top:10px}
 .chip{color:rgba(255,255,255,.85);font-size:11px;padding:3px 10px;
   border-radius:999px;background:rgba(255,255,255,.12);
@@ -298,7 +307,8 @@ local function previewHTML(result, title)
 <div class="blobs"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
 <div class="glass">
   <div class="title">✨ ]] .. htmlEscape(title) .. [[</div>
-  <div class="body">]] .. htmlEscape(result) .. [[</div>
+  <div class="body">]] .. htmlEscape(result) .. [[</div>]] .. flagHTML .. [[
+
   <div class="hints">
     <span class="chip">⏎ paste</span><span class="chip">R regenerate</span>
     <span class="chip">1–4 restyle</span><span class="chip">esc keep original</span>
@@ -349,7 +359,8 @@ local function previewShow(result, ctx)
   local measure = hs.canvas.new({ x = 0, y = 0, w = w - 40, h = 10 })
   local textH = measure:minimumTextSize(styled).h
   measure:delete()
-  local h = math.min(math.max(textH * 1.1 + 96, 150), screen.h * 0.6)
+  local flags = ctx.flags or {}
+  local h = math.min(math.max(textH * 1.1 + 96, 150) + 36 * math.ceil(#flags / 2), screen.h * 0.6)
   local title = ctx.extra and ctx.extra.reply and "reply ready" or "rewrite ready"
   if ctx.style and ctx.style ~= "" then title = title .. " · " .. ctx.style end
   if ctx.via then title = title .. " · " .. ctx.via end
@@ -362,7 +373,7 @@ local function previewShow(result, ctx)
   preview.wv:transparent(true)
   preview.wv:allowTextEntry(false)
   preview.wv:level(hs.canvas.windowLevels.overlay)
-  preview.wv:html(previewHTML(result, title))
+  preview.wv:html(previewHTML(result, title, flags))
   preview.wv:show(0.15)
 
   preview.modal = hs.hotkey.modal.new()
@@ -495,8 +506,11 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
     if exitCode == 0 and result ~= "" then
       hudPop()
       local via = collectedErr:match("via:(%w+)")
+      local flags = {}
+      for f in collectedErr:gmatch("flag:([^\n]+)") do flags[#flags + 1] = f end
       hs.timer.doAfter(0.4, function()
         previewShow(result, {
+          flags = flags,
           sel = sel,
           oldClipboard = oldClipboard,
           instruction = instruction,
