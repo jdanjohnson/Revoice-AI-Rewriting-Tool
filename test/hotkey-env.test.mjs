@@ -22,8 +22,11 @@ const eq = (name, got, want) => {
   ok ? pass++ : fail++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `\n      got  ${JSON.stringify(got)}\n      want ${JSON.stringify(want)}`}`);
 };
+const homes = [];
+process.on("exit", () => { for (const h of homes) fs.rmSync(h, { recursive: true, force: true }); });
 const mk = (envText) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rv-"));
+  homes.push(home);
   fs.mkdirSync(path.join(home, ".revoice", "bin"), { recursive: true });
   fs.mkdirSync(path.join(home, "npmbin"));
   if (envText != null) fs.writeFileSync(path.join(home, ".revoice", "env"), envText);
