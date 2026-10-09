@@ -632,6 +632,72 @@ local function readRecentHistory()
   return entries
 end
 
+-- backend picker: edits REWRITE_BACKEND in ~/.revoice/env (the CLI reads it on every run) ----
+local ENV_FILE = os.getenv("HOME") .. "/.revoice/env"
+local BACKEND_OPTIONS = {
+  { id = "",       label = "Auto (claude → codex → openai → kimi → ollama)" },
+  { id = "claude", label = "Claude (Claude Code CLI)" },
+  { id = "codex",  label = "Codex / GPT-6 Astra (ChatGPT subscription)" },
+  { id = "openai", label = "OpenAI API (paid per token, fast)" },
+  { id = "kimi",   label = "Kimi" },
+  { id = "ollama", label = "Ollama (local)" },
+}
+
+local function readEnvLines()
+  local f = io.open(ENV_FILE, "r")
+  if not f then return {} end
+  local lines = {}
+  for line in f:lines() do lines[#lines + 1] = line end
+  f:close()
+  return lines
+end
+
+local function backendAssignment(line)
+  return line:match("^%s*REWRITE_BACKEND%s*=%s*(.*)$") or line:match("^%s*export%s+REWRITE_BACKEND%s*=%s*(.*)$")
+end
+
+-- same rules as the CLI: last assignment wins, quotes and trailing comments stripped
+local function currentBackend()
+  local cur = ""
+  for _, line in ipairs(readEnvLines()) do
+    local v = backendAssignment(line)
+    if v then
+      local quoted = v:match('^"(.-)"') or v:match("^'(.-)'")
+      if quoted then v = quoted else v = (v:gsub("%s+#.*$", "")) end
+      cur = (v:gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+  end
+  return cur
+end
+
+local function setBackend(id)
+  local kept = {}
+  for _, line in ipairs(readEnvLines()) do
+    if not backendAssignment(line) then kept[#kept + 1] = line end
+  end
+  while #kept > 0 and kept[#kept] == "" do kept[#kept] = nil end
+  if id ~= "" then kept[#kept + 1] = "REWRITE_BACKEND=" .. id end
+  hs.fs.mkdir(os.getenv("HOME") .. "/.revoice")
+  local f = io.open(ENV_FILE, "w")
+  if not f then hs.alert.show("revoice: can't write " .. ENV_FILE, 3); return end
+  f:write(#kept > 0 and (table.concat(kept, "\n") .. "\n") or "")
+  f:close()
+  hs.alert.show("backend: " .. (id == "" and "auto" or id), 1.5)
+  if menubarRefresh then menubarRefresh() end
+end
+
+local function runDoctor()
+  local node = findNode()
+  if not node then hs.alert.show("revoice: node not found — brew install node", 4); return end
+  local task = hs.task.new(node, function(exitCode, stdOut, stdErr)
+    local report = (stdOut or "") .. (stdErr or "")
+    if report == "" then report = "doctor exited " .. tostring(exitCode) .. " with no output" end
+    hs.dialog.blockAlert("revoice doctor", report, "OK")
+  end, { CLI, "--doctor" })
+  task:setEnvironment(taskEnv())
+  task:start()
+end
+
 local function buildMenu()
   local items = {}
   local recents = readRecentHistory()
@@ -652,6 +718,14 @@ local function buildMenu()
       })
     end
   end
+  table.insert(items, { title = "-" })
+  local cur = currentBackend()
+  local picker = {}
+  for _, o in ipairs(BACKEND_OPTIONS) do
+    table.insert(picker, { title = o.label, checked = (cur == o.id), fn = function() setBackend(o.id) end })
+  end
+  table.insert(items, { title = "Backend: " .. (cur == "" and "auto" or cur), menu = picker })
+  table.insert(items, { title = "Run doctor", fn = runDoctor })
   table.insert(items, { title = "-" })
   table.insert(items, {
     title = "Edit voice samples",
