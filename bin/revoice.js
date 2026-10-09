@@ -40,7 +40,7 @@
  *   REWRITE_TIMEOUT_MS (default 25000)
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -975,6 +975,23 @@ function parseArgs(argv) {
       }
       console.log(BUILTIN_STYLES[name] + "\n\n" + PROMPT_RULES);
       process.exit(0);
+    } else if (a === "--update") {
+      // `git pull` the checkout the installer was last run from, then re-run install.sh
+      const srcFile = path.join(CONFIG_DIR, "src-path");
+      const src = fs.existsSync(srcFile) ? fs.readFileSync(srcFile, "utf8").trim() : "";
+      if (!src || !fs.existsSync(path.join(src, "install.sh"))) {
+        console.error(`revoice: don't know where the source is (${srcFile} missing or stale) — re-run install.sh from a checkout, or:\n  curl -fsSL https://raw.githubusercontent.com/jdanjohnson/Revoice-AI-Rewriting-Tool/main/install.sh | bash`);
+        process.exit(1);
+      }
+      if (!fs.existsSync(path.join(src, ".git"))) {
+        console.error(`revoice: ${src} is not a git checkout — cd there and update it by hand, then ./install.sh`);
+        process.exit(1);
+      }
+      console.error(`==> Updating ${src}`);
+      const pull = spawnSync("git", ["-C", src, "pull", "--ff-only"], { stdio: "inherit" });
+      if (pull.status !== 0) process.exit(pull.status ?? 1);
+      const inst = spawnSync("bash", [path.join(src, "install.sh")], { stdio: "inherit", env: { ...process.env, HOME: os.homedir() } });
+      process.exit(inst.status ?? 1);
     } else if (a === "--doctor") {
       const { chain } = resolveChain(process.env.REWRITE_BACKEND);
       const codex = findCodex();
@@ -1001,7 +1018,7 @@ function parseArgs(argv) {
     }
     else if (a === "--help" || a === "-h") {
       console.log(
-        "Usage: echo TEXT | revoice [--backend auto|claude|codex|openai|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills] [--doctor]\n" +
+        "Usage: echo TEXT | revoice [--backend auto|claude|codex|openai|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills] [--doctor] [--update]\n" +
         "       echo NOTES | revoice --reply [--context TEXT] [--image FILE]...   (draft a reply in your voice; NOTES may be empty)"
       );
       process.exit(0);

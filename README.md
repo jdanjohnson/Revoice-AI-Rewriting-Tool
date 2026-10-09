@@ -71,10 +71,10 @@ This is the part that makes revoice different:
 ## Get started (2 minutes)
 
 ```bash
-git clone https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool.git revoice
-cd revoice
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/jdanjohnson/Revoice-AI-Rewriting-Tool/main/install.sh | bash
 ```
+
+(Prefer to see what you're running? `git clone https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool.git revoice && cd revoice && ./install.sh` does the same thing.) Later, `revoice --update` pulls the latest version and re-installs.
 
 Then open Hammerspoon, grant it **Accessibility** permission (System Settings → Privacy & Security → Accessibility), and click **Reload Config**.
 
