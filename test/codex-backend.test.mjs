@@ -120,6 +120,10 @@ function check(name, cond, detail) {
 const eq = (name, a, b) => check(name, JSON.stringify(a) === JSON.stringify(b), `got ${JSON.stringify(a)}\n      want ${JSON.stringify(b)}`);
 
 const DRAFT = "hey — can u send the Q3 SOW + MSA over today? it's a big \"deal\" for us\nthx";
+// Ollama gets the framed draft as its user message (see ollama.test.mjs); the fake echoes it back
+const OLLAMA_OUT = "OLLAMA: DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + DRAFT;
+const lastErr = (r) => r.err.trim().split("\n").pop();
+const fellBack = (r) => /^revoice: .* — falling back to local Ollama \(llama3\.2:3b\)$/.test(r.err.trim().split("\n")[0]);
 
 // 1. explicit codex: argv contract, prompt composition, output from -o file, stdin closed, cwd tmp
 {
@@ -203,7 +207,7 @@ const DRAFT = "hey — can u send the Q3 SOW + MSA over today? it's a big \"deal
 // 8. codex missing binary → in auto chain skipped instantly, falls to ollama
 {
   const r = run(DRAFT, [], { CODEX_BIN: path.join(T, "nope"), CLAUDE_BIN: path.join(T, "nope2") });
-  eq("auto: missing claude+codex → ollama", [r.code, r.out, r.err.trim()], [0, "OLLAMA: " + DRAFT, "via:ollama"]);
+  eq("auto: missing claude+codex → ollama (with fallback warning)", [r.code, r.out, lastErr(r), fellBack(r)], [0, OLLAMA_OUT, "via:ollama", true]);
   eq("auto: kimi skipped (no key) in auto chain", kimiCalls(), 0);
 }
 
@@ -225,7 +229,7 @@ const DRAFT = "hey — can u send the Q3 SOW + MSA over today? it's a big \"deal
   const r2 = run(DRAFT, [], { REWRITE_BACKEND: "codex,claude,kimi,ollama", FAKE_CODEX_MODE: "fail" });
   eq("chain codex,...: codex fails → claude", [r2.code, r2.out, r2.err.trim()], [0, "CLAUDE: " + DRAFT, "via:claude"]);
   const r3 = run(DRAFT, [], { REWRITE_BACKEND: "codex,ollama", FAKE_CODEX_MODE: "fail" });
-  eq("chain codex,ollama: codex fails → ollama, claude skipped", [r3.err.trim(), claudeCalls(), ollamaCalls()], ["via:ollama", 0, 1]);
+  eq("chain codex,ollama: codex fails → ollama, claude skipped", [lastErr(r3), fellBack(r3), claudeCalls(), ollamaCalls()], ["via:ollama", true, 0, 1]);
 }
 
 // 11. --backend overrides REWRITE_BACKEND
@@ -252,7 +256,7 @@ const DRAFT = "hey — can u send the Q3 SOW + MSA over today? it's a big \"deal
   const r4 = run(DRAFT, ["--backend", "kimi"]);
   eq("explicit kimi without key fails hard (no ollama)", [r4.code, r4.err.trim(), ollamaCalls()], [1, "kimi: KIMI_API_KEY not set", 0]);
   const r5 = run(DRAFT, [], { REWRITE_BACKEND: " codex , auto ", FAKE_CODEX_MODE: "fail", FAKE_CLAUDE_MODE: "fail" });
-  eq("chain 'codex,auto' dedups: codex, claude, (kimi skipped), ollama", [r5.err.trim(), codexCalls().length, claudeCalls(), ollamaCalls()], ["via:ollama", 1, 1, 1]);
+  eq("chain 'codex,auto' dedups: codex, claude, (kimi skipped), ollama", [lastErr(r5), codexCalls().length, claudeCalls(), ollamaCalls()], ["via:ollama", 1, 1, 1]);
   const r6 = run(DRAFT, [], { REWRITE_BACKEND: "" });
   eq("REWRITE_BACKEND empty string = auto", [r6.err.trim()], ["via:claude"]);
 }
@@ -268,7 +272,7 @@ const DRAFT = "hey — can u send the Q3 SOW + MSA over today? it's a big \"deal
   const t0 = Date.now();
   const r = run(DRAFT, [], { REWRITE_BACKEND: "codex,ollama", FAKE_CODEX_MODE: "hang", CODEX_TIMEOUT_MS: "1500" });
   const dt = Date.now() - t0;
-  eq("timeout: falls to ollama", [r.code, r.err.trim()], [0, "via:ollama"]);
+  eq("timeout: falls to ollama", [r.code, lastErr(r), fellBack(r)], [0, "via:ollama", true]);
   check("timeout: took ~1.5s (not 25s)", dt > 1400 && dt < 6000, `${dt}ms`);
   const outFile = codexArgv()[8];
   check("timeout: temp output file removed", !fs.existsSync(outFile), outFile);

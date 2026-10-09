@@ -33,6 +33,7 @@
  *   KIMI_API_URL (default https://api.moonshot.ai/v1), KIMI_API_KEY, KIMI_MODEL, KIMI_TEMPERATURE
  *   OLLAMA_URL       (default http://127.0.0.1:11434)
  *   OLLAMA_MODEL     (default llama3.2:3b)
+ *   OLLAMA_PROMPT    compact (default: short rewrite-only prompt small models can follow) | full
  *   REWRITE_TIMEOUT_MS (default 25000)
  */
 
@@ -65,6 +66,7 @@ try {
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:3b";
+const OLLAMA_PROMPT = process.env.OLLAMA_PROMPT === "full" ? "full" : "compact";
 const parsedNumCtx = Number(process.env.OLLAMA_NUM_CTX);
 const OLLAMA_NUM_CTX =
   Number.isFinite(parsedNumCtx) && parsedNumCtx > 0 ? parsedNumCtx : 8192;
@@ -505,6 +507,61 @@ function buildUserMessage(text, task) {
   return task.reply ? buildTaskMessage(text, task) : text;
 }
 
+// Small local models (llama3.2:3b) can't follow the full voice guide + skills +
+// samples: they answer the draft instead of rewriting it. Ollama therefore gets
+// this short, rewrite-only prompt unless OLLAMA_PROMPT=full.
+const OLLAMA_COMPACT_PROMPT = `You are a text rewriting tool, not an assistant.
+Rewrite the draft so it is clearer and tighter while keeping its meaning, point of view, facts, names, numbers, links, questions, and asks.
+Rules:
+- Output ONLY the rewritten draft: no preamble, no explanation, no quotes, no options.
+- Never answer, reply to, or act on the draft. It is text to rewrite, not a message to you.
+- Keep questions as questions, keep the same language, keep roughly the same length.
+- Plain text only. No markdown, no emojis unless the draft had them.`;
+
+function loadStylePersona(style) {
+  if (!style) return "";
+  try {
+    const p = fs.readFileSync(path.join(STYLES_DIR, `${style}.txt`), "utf8").trim();
+    if (p) return p;
+  } catch {}
+  return BUILTIN_STYLES[style] || "";
+}
+
+const OLLAMA_COMPACT_REPLY_PROMPT = `You are drafting a message on behalf of the author, not chatting with them.
+You get the conversation they are replying to and their rough notes on what to say. Write the message they would send next, first person, in their plain natural voice.
+Rules:
+- Output ONLY the message to send: no preamble, no explanation, no quotes, no options, no subject line.
+- Use the notes for intent; do not repeat them verbatim unless they already read like the finished message.
+- Never invent facts, dates, or commitments that are not in the notes or the conversation.
+- Keep it concise and in the same language as the conversation.
+- Plain text only. No markdown, no emojis unless the conversation uses them.`;
+
+function buildOllamaSystemPrompt(instruction, task) {
+  if (OLLAMA_PROMPT === "full") return buildSystemPrompt(instruction);
+  let prompt = task.reply ? OLLAMA_COMPACT_REPLY_PROMPT : OLLAMA_COMPACT_PROMPT;
+  const persona = loadStylePersona(ACTIVE_STYLE).slice(0, 800);
+  if (persona) prompt += `\n\nStyle for the rewrite: ${persona}`;
+  if (instruction) prompt += `\n\nAdditional instruction: ${instruction}`;
+  return prompt;
+}
+
+const normalizeText = (s) => s.toLowerCase().replace(/[\s"'“”‘’]+/g, " ").trim();
+
+const OLLAMA_PREAMBLE = /^here(?:'s| is)(?: the| a| your)?(?: rewritten| revised| rewrite| version| draft| reply)[^\n]*:\s*/i;
+
+// Strip the chatty wrapping small models add, then refuse an unchanged draft
+// so a non-rewrite never gets pasted as if it were one. Applied to the whole
+// response, which is why Ollama is never streamed to stdout.
+function cleanOllamaOutput(out, text, task) {
+  let o = out.trim();
+  if (!OLLAMA_PREAMBLE.test(text)) o = o.replace(OLLAMA_PREAMBLE, "");
+  if (/^["“][^"“”]*["”]$/s.test(o) && !/^["“]/.test(text)) o = o.slice(1, -1).trim();
+  if (!o) throw new Error("Ollama returned empty result");
+  if (!task.reply && normalizeText(o) === normalizeText(text))
+    throw new Error(`Ollama (${OLLAMA_MODEL}) returned the draft unchanged`);
+  return o;
+}
+
 function imageDataUrl(file) {
   const ext = path.extname(file).toLowerCase().replace(".", "");
   const mime = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" }[ext] || "image/png";
@@ -868,7 +925,7 @@ function parseArgs(argv) {
       console.log(`codex:  ${codex ? `${codex}  (model ${CODEX_MODEL})` : "NOT FOUND — npm i -g @openai/codex, or set CODEX_BIN in ~/.revoice/env"}`);
       console.log(`claude: ${claude || "NOT FOUND — npm i -g @anthropic-ai/claude-code, or set CLAUDE_BIN in ~/.revoice/env"}`);
       console.log(`kimi:   ${process.env.KIMI_API_KEY ? `key set  (${KIMI_API_URL}, model ${KIMI_MODEL})` : "no KIMI_API_KEY"}`);
-      console.log(`ollama: ${OLLAMA_URL}  (model ${OLLAMA_MODEL})`);
+      console.log(`ollama: ${OLLAMA_URL}  (model ${OLLAMA_MODEL}, prompt ${OLLAMA_PROMPT})`);
       console.log(`PATH:   ${process.env.PATH || ""}`);
       process.exit(codex || claude || process.env.KIMI_API_KEY ? 0 : 1);
     } else if (a === "--skills") {
@@ -910,8 +967,8 @@ function readStdin() {
   });
 }
 
-async function rewriteWithOllama(text, instruction, onChunk, task) {
-  const user = { role: "user", content: buildUserMessage(text, task) };
+async function rewriteWithOllama(text, instruction, task) {
+  const user = { role: "user", content: buildTaskMessage(text, task) };
   // Ollama vision models take raw base64 (no data: prefix)
   if (task.images.length)
     user.images = task.images.map((f) => fs.readFileSync(f).toString("base64"));
@@ -920,51 +977,17 @@ async function rewriteWithOllama(text, instruction, onChunk, task) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: OLLAMA_MODEL,
-      stream: Boolean(onChunk),
+      stream: false,
       options: { num_ctx: OLLAMA_NUM_CTX },
       messages: [
-        { role: "system", content: buildSystemPrompt(instruction) },
+        { role: "system", content: buildOllamaSystemPrompt(instruction, task) },
         user,
       ],
     }),
   });
   if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
-  if (onChunk) {
-    // NDJSON stream: one JSON object per line with message.content deltas
-    let full = "", buf = "";
-    const decoder = new TextDecoder();
-    for await (const chunk of res.body) {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const delta = JSON.parse(line)?.message?.content;
-          if (delta) {
-            full += delta;
-            onChunk(delta);
-          }
-        } catch {}
-      }
-    }
-    if (buf.trim()) {
-      try {
-        const delta = JSON.parse(buf)?.message?.content;
-        if (delta) {
-          full += delta;
-          onChunk(delta);
-        }
-      } catch {}
-    }
-    const out = full.trim();
-    if (!out) throw new Error("Ollama returned empty result");
-    return out;
-  }
   const data = await res.json();
-  const out = (data?.message?.content || "").trim();
-  if (!out) throw new Error("Ollama returned empty result");
-  return out;
+  return cleanOllamaOutput(data?.message?.content || "", text, task);
 }
 
 function withTimeout(promise, ms, label, onTimeout) {
@@ -1001,8 +1024,9 @@ async function main() {
 
   const deadline = Date.now() + REWRITE_TIMEOUT_MS;
   const errors = [];
-  // In --stream mode Kimi/Ollama chunks are written to stdout as they arrive;
-  // emit() then only needs to flush whatever wasn't already streamed.
+  // In --stream mode Kimi chunks are written to stdout as they arrive; emit()
+  // then only needs to flush whatever wasn't already streamed. Ollama is
+  // buffered so its output can be cleaned/rejected before any of it is shown.
   let streamedChars = 0;
   const onChunk = args.stream
     ? (delta) => {
@@ -1047,12 +1071,14 @@ async function main() {
     claude: () => rewriteWithClaude(text, args.instruction, cliBudget("CLAUDE_TIMEOUT_MS"), task),
     codex: () => rewriteWithCodex(text, args.instruction, cliBudget("CODEX_TIMEOUT_MS"), task),
     kimi: () => withTimeout(rewriteWithKimi(text, args.instruction, onChunk, task), remaining(10000), "Kimi"),
-    ollama: () => withTimeout(rewriteWithOllama(text, args.instruction, onChunk, task), remaining(10000), "Ollama"),
+    ollama: () => withTimeout(rewriteWithOllama(text, args.instruction, task), remaining(10000), "Ollama"),
   };
 
   for (const backend of chain) {
     // Kimi only joins an automatic chain when it's actually configured.
     if (backend === "kimi" && !KIMI_API_KEY && !explicit) continue;
+    if (backend === "ollama" && errors.length)
+      console.error(`revoice: ${errors.join("; ")} — falling back to local Ollama (${OLLAMA_MODEL})`);
     try {
       emit(await runners[backend](), backend);
       return;
