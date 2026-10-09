@@ -272,7 +272,7 @@ const fellBack = (r) => /^revoice: .* — falling back to local Ollama \(llama3\
   const t0 = Date.now();
   const r = run(DRAFT, [], { REWRITE_BACKEND: "codex,ollama", FAKE_CODEX_MODE: "hang", CODEX_TIMEOUT_MS: "1500" });
   const dt = Date.now() - t0;
-  eq("timeout: falls to ollama", [r.code, r.err.trim()], [0, "via:ollama"]);
+  eq("timeout: falls to ollama", [r.code, lastErr(r), fellBack(r)], [0, "via:ollama", true]);
   check("timeout: took ~1.5s (not 25s)", dt > 1400 && dt < 6000, `${dt}ms`);
   const outFile = codexArgv()[8];
   check("timeout: temp output file removed", !fs.existsSync(outFile), outFile);
