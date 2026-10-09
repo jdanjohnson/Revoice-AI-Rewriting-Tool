@@ -57,6 +57,13 @@ const vPipe2 = head(WORK);
 r = sh(`cat ${REPO}/install.sh | bash`, { env: { REVOICE_REPO: ORIGIN } });
 eq("pipe again: pulls the existing clone to upstream HEAD (no clone), exit 0", [r.status, /==> Updating .*\/src/.test(r.stdout), /Cloning/.test(r.stdout), head(SRC)], [0, true, false, vPipe2]);
 
+// piped from a directory that *does* contain bin/revoice.js (e.g. ~/.revoice or a checkout):
+// still the clone/update path — never "install from cwd" (which would cp files onto themselves)
+fs.writeFileSync(path.join(WORK, "PIPE3.txt"), "pipe3\n");
+sh(`cd ${WORK} && git add -A && git commit -qm pipe3 && git push -q origin main`);
+r = sh(`cat ${REPO}/install.sh | bash`, { env: { REVOICE_REPO: ORIGIN }, cwd: RV });
+eq("pipe from ~/.revoice: exit 0, updates ~/.revoice/src rather than installing from cwd", [r.status, /==> Updating .*\/src/.test(r.stdout), head(SRC), /same file|are identical/.test(r.stderr)], [0, true, head(WORK), false]);
+
 // --update: publish v2 upstream, then update
 fs.writeFileSync(path.join(WORK, "NEW.txt"), "v2\n");
 sh(`cd ${WORK} && git add -A && git commit -qm v2 && git push -q origin main`);
@@ -88,6 +95,9 @@ eq("--update: missing src-path -> exit 1", [r.status, /src-path missing or stale
 // checkout install records the checkout dir (not ~/.revoice/src)
 r = sh(`bash ${WORK}/install.sh`);
 eq("checkout install: exit 0, src-path = that checkout", [r.status, read(path.join(RV, "src-path"))], [0, WORK + "\n"]);
+
+r = sh(`node ${CLI} --help`);
+eq("--help lists --update (exit 0)", [r.status, /--update/.test(r.stdout + r.stderr)], [0, true]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

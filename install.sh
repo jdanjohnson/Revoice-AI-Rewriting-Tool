@@ -3,13 +3,12 @@
 # Installs the CLI to ~/.revoice and wires up the Hammerspoon hotkeys.
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
 DEST="$HOME/.revoice"
 REVOICE_REPO="${REVOICE_REPO:-https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool.git}"
 
-# One-line install (curl ... | bash): no checkout next to this script, so clone (or update)
-# the source into ~/.revoice/src and run the installer from there.
-if [ ! -f "$DIR/bin/revoice.js" ]; then
+# One-line install (curl ... | bash): the script comes from stdin, so there is no checkout
+# next to it — clone (or update) the source into ~/.revoice/src and run the installer from there.
+if [ -z "${BASH_SOURCE[0]:-}" ]; then
   SRC="$DEST/src"
   command -v git >/dev/null || { echo "git is required (xcode-select --install)"; exit 1; }
   if [ -d "$SRC/.git" ]; then
@@ -22,6 +21,7 @@ if [ ! -f "$DIR/bin/revoice.js" ]; then
   fi
   exec bash "$SRC/install.sh"
 fi
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OLD_DEST="$HOME/.spiral-rewrite"
 HS_DIR="$HOME/.hammerspoon"
 
