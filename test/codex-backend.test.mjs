@@ -248,15 +248,15 @@ const fellBack = (r) => /^revoice: .* — falling back to local Ollama \(llama3\
 // 13. invalid values
 {
   const r1 = run(DRAFT, ["--backend", "codex,foo"]);
-  eq("--backend invalid member", [r1.code, r1.err.trim()], [1, 'revoice: invalid --backend "codex,foo" (use auto|claude|codex|kimi|ollama or a comma-separated chain)']);
+  eq("--backend invalid member", [r1.code, r1.err.trim()], [1, 'revoice: invalid --backend "codex,foo" (use auto|claude|codex|openai|kimi|ollama or a comma-separated chain)']);
   const r2 = run(DRAFT, ["--backend"]);
-  eq("--backend missing value", [r2.code, r2.err.trim()], [1, "revoice: --backend requires a value (use auto|claude|codex|kimi|ollama or a comma-separated chain)"]);
+  eq("--backend missing value", [r2.code, r2.err.trim()], [1, "revoice: --backend requires a value (use auto|claude|codex|openai|kimi|ollama or a comma-separated chain)"]);
   const r3 = run(DRAFT, [], { REWRITE_BACKEND: "astra" });
-  eq("REWRITE_BACKEND invalid", [r3.code, r3.err.trim(), codexCalls().length], [1, 'revoice: invalid REWRITE_BACKEND "astra" (use auto|claude|codex|kimi|ollama or a comma-separated chain)', 0]);
+  eq("REWRITE_BACKEND invalid", [r3.code, r3.err.trim(), codexCalls().length], [1, 'revoice: invalid REWRITE_BACKEND "astra" (use auto|claude|codex|openai|kimi|ollama or a comma-separated chain)', 0]);
   const r4 = run(DRAFT, ["--backend", "kimi"]);
   eq("explicit kimi without key fails hard (no ollama)", [r4.code, r4.err.trim(), ollamaCalls()], [1, "kimi: KIMI_API_KEY not set", 0]);
   const r5 = run(DRAFT, [], { REWRITE_BACKEND: " codex , auto ", FAKE_CODEX_MODE: "fail", FAKE_CLAUDE_MODE: "fail" });
-  eq("chain 'codex,auto' dedups: codex, claude, (kimi skipped), ollama", [lastErr(r5), codexCalls().length, claudeCalls(), ollamaCalls()], ["via:ollama", 1, 1, 1]);
+  eq("chain 'codex,auto' dedups: codex, claude, (openai, kimi skipped), ollama", [lastErr(r5), codexCalls().length, claudeCalls(), ollamaCalls()], ["via:ollama", 1, 1, 1]);
   const r6 = run(DRAFT, [], { REWRITE_BACKEND: "" });
   eq("REWRITE_BACKEND empty string = auto", [r6.err.trim()], ["via:claude"]);
 }
@@ -283,7 +283,7 @@ const fellBack = (r) => /^revoice: .* — falling back to local Ollama \(llama3\
 // 16. help lists codex
 {
   const r = run("", ["--help"]);
-  check("--help mentions codex", r.out.includes("--backend auto|claude|codex|kimi|ollama|CHAIN"), r.out);
+  check("--help mentions codex", r.out.includes("--backend auto|claude|codex|openai|kimi|ollama|CHAIN"), r.out);
 }
 
 servers.kill();

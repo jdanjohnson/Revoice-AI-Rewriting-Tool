@@ -81,6 +81,7 @@ Then open Hammerspoon, grant it **Accessibility** permission (System Settings �
 
 - **ChatGPT (GPT-6 Astra)** — already have Codex? You're done. (If not: `npm i -g @openai/codex`, run `codex` once to sign in with your ChatGPT account.) Want Astra to go first? Put `REWRITE_BACKEND=codex,claude,kimi,ollama` in `~/.revoice/env`.
 - **Claude** — already have Claude Code? You're done. (If not: `npm i -g @anthropic-ai/claude-code`, run `claude` once to sign in.)
+- **OpenAI API** — want Astra in ~3 seconds with the text streaming in live, and don't mind paying per token? Drop `OPENAI_API_KEY=sk-...` into `~/.revoice/env` (model `gpt-6-astra`). Codex above is the free-with-your-subscription path; this is the fast one.
 - **Kimi** (or any OpenAI-compatible API) — drop `KIMI_API_KEY=sk-...` into `~/.revoice/env`.
 - **Totally free & private** — `brew install ollama && ollama pull llama3.2:3b` and everything runs on your Mac. Nothing leaves your machine.
 
