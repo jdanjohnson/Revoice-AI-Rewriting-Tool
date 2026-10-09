@@ -70,6 +70,8 @@ const eq = (name, a, b) => {
   const s = sys();
   eq("compact: no voice guide / skill / sample / rejected history", [s.includes("FULL VOICE GUIDE"), s.includes("delve"), s.includes("sample one"), s.includes("REJECTED")], [false, false, false, false]);
   eq("compact: request shape (model, stream off, num_ctx, 2 messages)", [lastReq().model, lastReq().stream, lastReq().options, lastReq().messages.length], ["llama3.2:3b", false, { num_ctx: 8192 }, 2]);
+  const rs = run(DRAFT, ["--backend", "ollama", "--stream"], {}, "Here is the rewritten draft:\nCan you send the Q3 SOW over today? Thanks.");
+  eq("--stream: Ollama is buffered (stream:false) and stdout gets only the cleaned text", [rs.code, rs.out, lastReq().stream], [0, "Can you send the Q3 SOW over today? Thanks.", false]);
 }
 // 2. instruction + styles
 {
@@ -116,6 +118,10 @@ const eq = (name, a, b) => {
   eq("strip wrapping curly quotes", r.out, "Can you send the Q3 SOW over today? Thanks.");
   r = run(DRAFT, ["--backend", "ollama"], {}, '"Can you send the Q3 SOW over today?" she asked.');
   eq("quote that doesn't wrap the whole output is kept", r.out, '"Can you send the Q3 SOW over today?" she asked.');
+  r = run(DRAFT, ["--backend", "ollama"], {}, '"Hello," he said. "How are you?"');
+  eq("two separate quotations at the ends are not a wrapper: kept", r.out, '"Hello," he said. "How are you?"');
+  r = run("Here is the revised version: we ship Friday", ["--backend", "ollama"], {}, "Here is the revised version: we ship on Friday.");
+  eq("draft that itself starts with a preamble-like intro: intro kept", r.out, "Here is the revised version: we ship on Friday.");
   r = run('"quoted" draft here', ["--backend", "ollama"], {}, '"Quoted" draft, here.');
   eq("draft that itself starts with a quote: not stripped", r.out, '"Quoted" draft, here.');
   r = run(DRAFT, ["--backend", "ollama"], {}, "Here is the rewrite:\n" + DRAFT);
@@ -141,7 +147,9 @@ const eq = (name, a, b) => {
   const r = run("yes but friday", ["--backend", "ollama", "--reply", "--context", "can you ship it thursday?"], {}, "yes but friday");
   eq("reply: notes echoed back are NOT treated as an echo (reply ≠ rewrite)", [r.code, r.out], [0, "yes but friday"]);
   eq("reply: user message is the reply brief with context + notes", [user().startsWith("REPLY MODE"), user().includes("CONVERSATION CONTEXT (what the author is replying to):\ncan you ship it thursday?"), user().endsWith("no quotes, no explanation.")], [true, true, true]);
-  eq("reply: system prompt compact", sys(), COMPACT);
+  eq("reply: compact REPLY system prompt (no never-reply rule, send-only output)", [sys().startsWith("You are drafting a message on behalf of the author, not chatting with them."), sys().includes("Never answer, reply to"), sys().includes("Output ONLY the message to send")], [true, false, true]);
+  run("ok", ["--backend", "ollama", "--reply", "--context", "c", "--style", "pirate", "--instruction", "short"], {}, "x");
+  eq("reply: style + instruction appended to the reply prompt", sys().endsWith("Style for the rewrite: Write like a pirate.\n\nAdditional instruction: short"), true);
 }
 // 8. doctor shows the prompt mode
 {

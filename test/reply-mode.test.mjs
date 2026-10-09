@@ -234,8 +234,8 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
   eq("ollama reply: user message = brief + images[base64]",
     ollamaBodies()[0].messages[1],
     { role: "user", content: brief({ notes: NOTES, img: true }), images: [PNG_BYTES.toString("base64")] });
-  eq("ollama reply: compact system prompt (the reply brief in the user message overrides its no-reply rule)",
-    [ollamaBodies()[0].messages[0].role, ollamaBodies()[0].messages[0].content.startsWith("You are a text rewriting tool, not an assistant.")], ["system", true]);
+  eq("ollama reply: compact reply system prompt (no never-reply rule)",
+    [ollamaBodies()[0].messages[0].role, ollamaBodies()[0].messages[0].content.startsWith("You are drafting a message on behalf of the author")], ["system", true]);
   r = run(NOTES, ["--backend", "ollama"]);
   eq("ollama plain rewrite: no images key, content = framed draft",
     ollamaBodies()[0].messages[1], { role: "user", content: "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + NOTES });
