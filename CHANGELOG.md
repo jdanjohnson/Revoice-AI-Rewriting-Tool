@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **One-line install + `revoice --update`**: `curl -fsSL …/install.sh | bash` clones the source into `~/.revoice/src` and installs from there; `revoice --update` runs `git pull --ff-only` on whatever checkout the installer last ran from (recorded in `~/.revoice/src-path`) and re-runs `install.sh`. `REVOICE_REPO=<url>` installs from a fork.
 - **Ambiguity flags in the preview**: when a draft could materially be read two ways, the model appends a `FLAGS:` line; the CLI strips it from the rewrite (also while streaming) and reports `flag:` lines on stderr, and the preview shows them as ⚑ chips so you catch them before pasting. Flags are stored with the history entry.
 - **Menu-bar backend picker + Run doctor**: ✍️ → *Backend* switches between Auto / Claude / Codex / OpenAI / Kimi / Ollama by rewriting `REWRITE_BACKEND` in `~/.revoice/env` (other lines untouched, every old assignment replaced), and ✍️ → *Run doctor* shows the `revoice --doctor` report in a dialog — no terminal needed.
 - Native OpenAI API backend (`openai`): `OPENAI_API_KEY` in `~/.revoice/env` runs GPT-6 Astra through the Chat Completions API — ~3 s and streaming into the HUD instead of Codex CLI startup, paid per token. `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT` (default `low`), `OPENAI_API_URL`; sits after Codex in the automatic chain, skipped without a key; shown by `--doctor`.
