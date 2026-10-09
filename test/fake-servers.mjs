@@ -10,6 +10,11 @@ createServer((req, res) => {
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     fs.appendFileSync(`${T}/ollama.log`, body + "\n");
+    let delay = 0;
+    try { delay = Number(fs.readFileSync(`${T}/ollama.delay`, "utf8")); } catch {}
+    setTimeout(answer, delay);
+  });
+  function answer() {
     const parsed = JSON.parse(body);
     const userMsg = parsed.messages.find((m) => m.role === "user");
     // canned reply: tests write ${T}/ollama.reply to control the model's answer verbatim
@@ -17,7 +22,7 @@ createServer((req, res) => {
     try { content = fs.readFileSync(`${T}/ollama.reply`, "utf8"); } catch {}
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ message: { role: "assistant", content } }));
-  });
+  }
 }).listen(4711);
 
 createServer((req, res) => {
@@ -58,6 +63,13 @@ createServer((req, res) => {
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     fs.appendFileSync(`${T}/openai.log`, JSON.stringify({ path: req.url, auth: req.headers.authorization || null, body: JSON.parse(body) }) + "\n");
+    let delay = 0;
+    try { delay = Number(fs.readFileSync(`${T}/openai.delay`, "utf8")); } catch {}
+    let answered = false;
+    req.on("close", () => { if (!answered) fs.appendFileSync(`${T}/openai-aborted.log`, "client aborted before response\n"); });
+    setTimeout(() => { answered = true; answer(); }, delay);
+  });
+  function answer() {
     let status = 0;
     try { status = Number(fs.readFileSync(`${T}/openai.status`, "utf8")); } catch {}
     if (status) {
@@ -75,11 +87,13 @@ createServer((req, res) => {
       const half = Math.ceil(content.length / 2);
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant" } }] })}\n\n`);
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(0, half) } }] })}\n\n`);
+      // ${T}/openai.truncate: orderly close after the first delta, no [DONE]
+      if (fs.existsSync(`${T}/openai.truncate`)) return res.end();
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(half) } }] })}\n\n`);
       res.end("data: [DONE]\n\n");
     } else {
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
     }
-  });
+  }
 }).listen(4714);

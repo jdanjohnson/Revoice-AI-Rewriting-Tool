@@ -32,11 +32,16 @@ const srv = spawn(process.execPath, [path.join(HERE, "fake-servers.mjs"), T], { 
 await new Promise((res) => srv.stdout.on("data", (d) => /ready/.test(String(d)) && res()));
 
 const DRAFT = "hey can u send the Q3 SOW over today? thx";
+const FRAMED = "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + DRAFT;
 const base = { HOME, PATH: process.env.PATH, OPENAI_API_URL: "http://127.0.0.1:4714/v1", OPENAI_API_KEY: "sk-test-123", CODEX_BIN: path.join(T, "nope"), CLAUDE_BIN: path.join(T, "nope2"), OLLAMA_URL: "http://127.0.0.1:4711" };
 function run(input, args, env = {}, opts = {}) {
   for (const f of [LOG, KIMI_LOG, OLLAMA_LOG]) fs.rmSync(f, { force: true });
   if (opts.reply === undefined) fs.rmSync(path.join(T, "openai.reply"), { force: true }); else fs.writeFileSync(path.join(T, "openai.reply"), opts.reply);
   if (opts.status === undefined) fs.rmSync(path.join(T, "openai.status"), { force: true }); else fs.writeFileSync(path.join(T, "openai.status"), String(opts.status));
+  if (opts.delay === undefined) fs.rmSync(path.join(T, "openai.delay"), { force: true }); else fs.writeFileSync(path.join(T, "openai.delay"), String(opts.delay));
+  if (opts.truncate) fs.writeFileSync(path.join(T, "openai.truncate"), "1"); else fs.rmSync(path.join(T, "openai.truncate"), { force: true });
+  fs.rmSync(path.join(T, "openai-aborted.log"), { force: true });
+  if (opts.ollamaDelay === undefined) fs.rmSync(path.join(T, "ollama.delay"), { force: true }); else fs.writeFileSync(path.join(T, "ollama.delay"), String(opts.ollamaDelay));
   const e = { ...base, ...env };
   for (const k of Object.keys(e)) if (e[k] === undefined) delete e[k];
   const r = spawnSync(process.execPath, [CLI, ...args], { input, env: e, encoding: "utf8" });
@@ -66,7 +71,7 @@ try {
   r = run(DRAFT, ["--backend", "openai"], { OPENAI_MODEL: "gpt-6-mini", OPENAI_REASONING_EFFORT: "HIGH" });
   eq("OPENAI_MODEL + OPENAI_REASONING_EFFORT (case-insensitive) honoured", [r.code, body().model, body().reasoning_effort, r.err], [0, "gpt-6-mini", "high", "via:openai"]);
   r = run(DRAFT, ["--backend", "openai"], { OPENAI_REASONING_EFFORT: "turbo" });
-  eq("invalid OPENAI_REASONING_EFFORT: warned, falls back to low, request still sent", [r.code, body().reasoning_effort, r.err], [0, "low", 'revoice: ignoring invalid OPENAI_REASONING_EFFORT "turbo" (use none|minimal|low|medium|high|xhigh|max)\nvia:openai']);
+  eq("invalid OPENAI_REASONING_EFFORT: warned, falls back to low, request still sent", [r.code, body().reasoning_effort, r.err], [0, "low", 'revoice: ignoring invalid OPENAI_REASONING_EFFORT "turbo" (use off|none|minimal|low|medium|high|xhigh|max)\nvia:openai']);
   r = run(DRAFT, ["--backend", "openai"], { OPENAI_API_URL: "http://127.0.0.1:4714/v1/" });
   eq("trailing slash in OPENAI_API_URL: no double slash", [r.code, last().path], [0, "/v1/chat/completions"]);
   fs.writeFileSync(path.join(RV, "env"), "OPENAI_API_KEY=sk-from-file\nOPENAI_MODEL=gpt-6-astra-file\n");
@@ -76,11 +81,24 @@ try {
   r = run(DRAFT, ["--backend", "openai", "--instruction", "shorter", "--style", "casual"]);
   eq("style + instruction land in the system prompt, draft stays the user message", [body().messages[0].content.includes("Additional instruction: shorter"), body().messages[0].content.includes("FULL VOICE GUIDE"), body().messages[1].content], [true, false, DRAFT]);
 
+  r = run(DRAFT, ["--backend", "openai"], { OPENAI_REASONING_EFFORT: "off" });
+  eq("OPENAI_REASONING_EFFORT=off: field omitted (non-reasoning OPENAI_MODEL)", [r.code, "reasoning_effort" in body(), Object.keys(body()).sort(), r.err], [0, false, ["messages", "model"], "via:openai"]);
+
   // ---- streaming ----
   r = run(DRAFT, ["--backend", "openai", "--stream"], {}, { reply: "Can you send the Q3 SOW over today? Thanks." });
   eq("--stream: stream:true in body, deltas concatenated on stdout, via:openai", [r.code, body().stream, r.out, r.err], [0, true, "Can you send the Q3 SOW over today? Thanks.", "via:openai"]);
   r = run(DRAFT, ["--backend", "openai"], {}, { reply: "  Trimmed.  \n" });
   eq("non-stream: output trimmed", r.out, "Trimmed.");
+
+  r = run(DRAFT, ["--backend", "openai,kimi", "--stream"], { KIMI_API_KEY: "k", KIMI_API_URL: "http://127.0.0.1:4713" }, { reply: "Please send the SOW.", truncate: true });
+  eq("stream closes before [DONE]: partial stays on stdout, exit 1, exact error, NO fallback to kimi", [r.code, r.out, r.err, calls(KIMI_LOG).length], [1, "Please sen", "openai: OpenAI stream ended before [DONE]", 0]);
+  r = run(DRAFT, ["--backend", "openai", "--stream"], {}, { reply: "", truncate: true });
+  eq("stream with no text and no [DONE]: exit 1, ended-early error (not 'empty result')", [r.code, r.out, r.err], [1, "", "openai: OpenAI stream ended before [DONE]"]);
+  const t0 = Date.now();
+  // openai answers at 12s, the deadline makes it time out at 10s, kimi is refused, ollama takes 3s more:
+  // without an abort, openai's late chunk would land on stdout while ollama is still working.
+  r = run(DRAFT, ["--backend", "openai,kimi,ollama", "--stream"], { KIMI_API_KEY: "k", KIMI_API_URL: "http://127.0.0.1:1", REWRITE_TIMEOUT_MS: "1000" }, { delay: 12000, ollamaDelay: 3000 });
+  eq("openai silent past the deadline: timed out + aborted, ollama's output alone on stdout", [r.code, r.out, r.err.split("\n").at(-1), r.err.includes("openai: OpenAI timed out after 10000ms"), fs.readFileSync(path.join(T, "openai-aborted.log"), "utf8").trim(), Date.now() - t0 < 16000], [0, "OLLAMA: " + FRAMED, "via:ollama", true, "client aborted before response", true]);
 
   // ---- reply mode with images ----
   r = run("friday works", ["--backend", "openai", "--reply", "--image", PNG, "--context", "Can you meet Thursday?"]);

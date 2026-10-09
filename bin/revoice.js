@@ -615,7 +615,8 @@ if (rawKimiTemp !== "" && KIMI_TEMPERATURE === null)
 const OPENAI_API_URL = (process.env.OPENAI_API_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-6-astra";
-const OPENAI_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+// "off" omits the field entirely (for OPENAI_MODEL set to a non-reasoning model).
+const OPENAI_REASONING_EFFORTS = ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const rawOpenaiEffort = (process.env.OPENAI_REASONING_EFFORT ?? "low").trim().toLowerCase();
 const OPENAI_REASONING_EFFORT = OPENAI_REASONING_EFFORTS.includes(rawOpenaiEffort) ? rawOpenaiEffort : "low";
 if (rawOpenaiEffort !== OPENAI_REASONING_EFFORT)
@@ -627,7 +628,7 @@ const KIMI_PROVIDER = {
 };
 const OPENAI_PROVIDER = {
   name: "OpenAI", keyVar: "OPENAI_API_KEY", url: OPENAI_API_URL, key: OPENAI_API_KEY, model: OPENAI_MODEL,
-  extra: () => ({ reasoning_effort: OPENAI_REASONING_EFFORT }),
+  extra: () => (OPENAI_REASONING_EFFORT === "off" ? {} : { reasoning_effort: OPENAI_REASONING_EFFORT }),
 };
 
 function findClaude() {
@@ -780,7 +781,7 @@ function codexErrorSummary(stderr) {
 }
 
 // Chat Completions over any OpenAI-compatible endpoint (OpenAI itself, Moonshot/Kimi, …).
-async function rewriteWithChatCompletions(p, text, instruction, onChunk, task) {
+async function rewriteWithChatCompletions(p, text, instruction, onChunk, task, signal) {
   if (!p.key) throw new Error(`${p.keyVar} not set`);
   const system = buildSystemPrompt(instruction);
   const url = `${p.url}/chat/completions`;
@@ -796,6 +797,7 @@ async function rewriteWithChatCompletions(p, text, instruction, onChunk, task) {
   try {
     res = await fetch(url, {
       method: "POST",
+      signal,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${p.key}`,
@@ -816,15 +818,17 @@ async function rewriteWithChatCompletions(p, text, instruction, onChunk, task) {
   if (!res.ok) throw new Error(`${p.name} API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   if (onChunk) {
     // OpenAI-compatible SSE stream: `data: {json}` lines, ends with [DONE]
-    let full = "", buf = "";
+    let full = "", buf = "", done = false;
     const decoder = new TextDecoder();
     for await (const chunk of res.body) {
+      if (signal?.aborted) break;
       buf += decoder.decode(chunk, { stream: true });
       const lines = buf.split("\n");
       buf = lines.pop();
       for (const line of lines) {
         const m = line.match(/^data:\s*(.*)$/);
-        if (!m || m[1] === "[DONE]") continue;
+        if (!m) continue;
+        if (m[1] === "[DONE]") { done = true; continue; }
         try {
           const delta = JSON.parse(m[1])?.choices?.[0]?.delta?.content;
           if (delta) {
@@ -836,7 +840,8 @@ async function rewriteWithChatCompletions(p, text, instruction, onChunk, task) {
     }
     // flush a trailing line the provider didn't newline-terminate
     const m = buf.match(/^data:\s*(.*)$/);
-    if (m && m[1] !== "[DONE]") {
+    if (m && m[1] === "[DONE]") done = true;
+    else if (m) {
       try {
         const delta = JSON.parse(m[1])?.choices?.[0]?.delta?.content;
         if (delta) {
@@ -845,6 +850,7 @@ async function rewriteWithChatCompletions(p, text, instruction, onChunk, task) {
         }
       } catch {}
     }
+    if (!done) throw new Error(`${p.name} stream ended before [DONE]`);
     const out = full.trim();
     if (!out) throw new Error(`${p.name} returned empty result`);
     return out;
@@ -1092,11 +1098,16 @@ async function main() {
     }
   }
 
+  // a timed-out API request is aborted so its late chunks can't bleed into the next backend's output
+  const chatApi = (p) => {
+    const ac = new AbortController();
+    return withTimeout(rewriteWithChatCompletions(p, text, args.instruction, onChunk, task, ac.signal), remaining(10000), p.name, () => ac.abort());
+  };
   const runners = {
     claude: () => rewriteWithClaude(text, args.instruction, cliBudget("CLAUDE_TIMEOUT_MS"), task),
     codex: () => rewriteWithCodex(text, args.instruction, cliBudget("CODEX_TIMEOUT_MS"), task),
-    openai: () => withTimeout(rewriteWithChatCompletions(OPENAI_PROVIDER, text, args.instruction, onChunk, task), remaining(10000), "OpenAI"),
-    kimi: () => withTimeout(rewriteWithChatCompletions(KIMI_PROVIDER, text, args.instruction, onChunk, task), remaining(10000), "Kimi"),
+    openai: () => chatApi(OPENAI_PROVIDER),
+    kimi: () => chatApi(KIMI_PROVIDER),
     ollama: () => withTimeout(rewriteWithOllama(text, args.instruction, task), remaining(10000), "Ollama"),
   };
 
