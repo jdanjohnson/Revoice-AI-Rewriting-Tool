@@ -1,16 +1,15 @@
 -- Loads hammerspoon/revoice.lua against a stub `hs`, then drives the ⌃⇧R
 -- hotkey and asserts the CLI argv / stdin / screenshot lifecycle.
--- Run: `npm test` (or HOME=$PWD/test/.tmp-hs-reply lua test/hammerspoon-reply.test.lua)
+-- Run: `npm test` (the runner creates the scratch HOME)
 -- Resolve hammerspoon/revoice.lua relative to this file; refuse to run against a real HOME
--- (the test wipes HOME to simulate a fresh install). `npm test` sets both up.
+-- (it must be an empty scratch dir simulating a fresh install). `npm test` sets both up.
 local HERE = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
 local MODULE = HERE .. "/../hammerspoon/revoice.lua"
 if not (os.getenv("HOME") or ""):match("/%.tmp%-hs%-[^/]+$") then
   io.stderr:write("refusing to run: HOME must be a scratch dir named .tmp-hs-* (use `npm test`)\n")
   os.exit(2)
 end
-local HOME = os.getenv("HOME")
-os.execute("rm -rf " .. HOME .. " && mkdir -p " .. HOME .. "/.revoice/bin")
+local HOME = os.getenv("HOME")  -- run.mjs creates it empty with .revoice/bin inside
 
 local pass, fail = 0, 0
 local function check(name, cond, detail)

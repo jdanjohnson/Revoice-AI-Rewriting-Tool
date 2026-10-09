@@ -34,7 +34,11 @@ if (!lua && luaSuites.length) console.log(`\n(skipping ${luaSuites.length} Hamme
 if (lua) {
   for (const f of luaSuites) {
     console.log(`\n### ${f} (${lua})`);
+    // fresh scratch HOME per suite (the suites simulate a first install); created here with
+    // fs calls so the path never goes through a shell
     const home = path.join(HERE, `.tmp-hs-${f.replace(/\W/g, "-")}`);
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, ".revoice", "bin"), { recursive: true });
     record(f, spawnSync(lua, [path.join(HERE, f)], { encoding: "utf8", env: { ...process.env, HOME: home }, timeout: 120_000 }));
   }
 }
