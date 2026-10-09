@@ -33,7 +33,7 @@ const mk = (envText) => {
   return home;
 };
 const run = (home, args, extraEnv = {}, PATH = "/usr/bin:/bin") => {
-  const r = spawnSync("node", [CLI, ...args], { env: { HOME: home, PATH, ...extraEnv }, encoding: "utf8" });
+  const r = spawnSync(process.execPath, [CLI, ...args], { env: { HOME: home, PATH, ...extraEnv }, encoding: "utf8" });
   return { out: r.stdout.trim().split("\n"), code: r.status };
 };
 const line = (out, prefix) => out.find((l) => l.startsWith(prefix)) || "";
