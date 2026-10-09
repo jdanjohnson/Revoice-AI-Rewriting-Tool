@@ -678,10 +678,21 @@ local function setBackend(id)
   while #kept > 0 and kept[#kept] == "" do kept[#kept] = nil end
   if id ~= "" then kept[#kept + 1] = "REWRITE_BACKEND=" .. id end
   hs.fs.mkdir(os.getenv("HOME") .. "/.revoice")
-  local f = io.open(ENV_FILE, "w")
-  if not f then hs.alert.show("revoice: can't write " .. ENV_FILE, 3); return end
-  f:write(#kept > 0 and (table.concat(kept, "\n") .. "\n") or "")
-  f:close()
+  -- the file also holds API keys: write a sibling temp file and rename it over, so a
+  -- failed write can never leave the real file truncated
+  local isNew = io.open(ENV_FILE, "r") == nil
+  local tmp = ENV_FILE .. ".tmp"
+  local f = io.open(tmp, "w")
+  local ok = f ~= nil
+  if ok then ok = f:write(#kept > 0 and (table.concat(kept, "\n") .. "\n") or "") ~= nil end
+  if f then ok = f:close() and ok end
+  if ok then ok = os.rename(tmp, ENV_FILE) end
+  if not ok then
+    os.remove(tmp)
+    hs.alert.show("revoice: couldn't update " .. ENV_FILE .. " — settings left unchanged", 4)
+    return
+  end
+  if isNew then hs.execute("chmod 600 " .. ENV_FILE) end
   hs.alert.show("backend: " .. (id == "" and "auto" or id), 1.5)
   if menubarRefresh then menubarRefresh() end
 end

@@ -23,12 +23,12 @@ end
 local function writeEnv(s) local f = assert(io.open(ENV, "w")); f:write(s); f:close() end
 local function readEnv() local f = io.open(ENV, "r"); if not f then return nil end; local s = f:read("a"); f:close(); return s end
 
-local S = { tasks = {}, alerts = {}, dialogs = {}, shellPath = "/Users/j/.nvm/versions/node/v22/bin:/usr/bin:/bin\n" }
+local S = { tasks = {}, alerts = {}, dialogs = {}, execs = {}, shellPath = "/Users/j/.nvm/versions/node/v22/bin:/usr/bin:/bin\n" }
 local wv = setmetatable({}, { __index = function() return function(self) return self end end })
 hs = {
   fs = { attributes = function(p) if p == "/usr/bin/node" then return { mode = "file" } end return nil end,
     mkdir = function() end, dir = function() return function() return nil end end },
-  execute = function(cmd) if cmd:find("PATH") then return S.shellPath end return "/usr/bin/node" end,
+  execute = function(cmd) S.execs[#S.execs + 1] = cmd; if cmd:find("PATH") then return S.shellPath end return "/usr/bin/node" end,
   application = { frontmostApplication = function() return { bundleID = function() return "x" end } end },
   json = { read = function() return nil end, encode = function(s) return '"' .. tostring(s) .. '"' end,
     decode = function() return nil end },
@@ -86,9 +86,12 @@ for _, it in ipairs(picker.menu) do labels[#labels + 1] = it.title:match("^(%S+)
 eq("fresh: options in chain order", table.concat(labels, ","), "Auto,Claude,Codex,OpenAI,Kimi,Ollama")
 eq("fresh: Run doctor item present with fn", item(items, "Run doctor") ~= nil and type(item(items, "Run doctor").fn), "function")
 
--- 2. pick Kimi: env file created with exactly one line, alert, menu rebuilt with Kimi checked
+-- 2. pick Kimi: env file created with exactly one line, made private, alert, menu rebuilt with Kimi checked
+S.execs = {}
 clickOption(picker.menu, "Kimi")
 eq("pick kimi: env file content", readEnv(), "REWRITE_BACKEND=kimi\n")
+eq("pick kimi: new file gets chmod 600", S.execs[#S.execs], "chmod 600 " .. ENV)
+eq("pick kimi: no stray temp file", io.open(ENV .. ".tmp", "r"), nil)
 eq("pick kimi: alert", S.alerts[#S.alerts], "backend: kimi")
 items = menu(); picker = item(items, "Backend:")
 eq("pick kimi: title", picker.title, "Backend: kimi")
@@ -100,7 +103,9 @@ writeEnv("# my settings\nKIMI_API_KEY=abc\nexport REWRITE_BACKEND=claude\nOPENAI
 items = menu(); picker = item(items, "Backend:")
 eq("quoted+comment: current parsed as openai (last wins)", picker.title, "Backend: openai")
 eq("quoted+comment: OpenAI checked", checked(picker.menu), "OpenAI API (paid per token, fast)")
+S.execs = {}
 clickOption(picker.menu, "Codex")
+eq("pick codex: existing file is not re-chmodded", #S.execs, 0)
 eq("pick codex: others kept, old lines dropped, one appended", readEnv(),
   "# my settings\nKIMI_API_KEY=abc\nOPENAI_API_KEY=sk-1 # paid\nREWRITE_BACKEND=codex\n")
 eq("pick codex: title", menu()[#items - #items + 1] and item(menu(), "Backend:").title, "Backend: codex")
@@ -122,6 +127,17 @@ writeEnv("# REWRITE_BACKEND=kimi (old note)\nMY_REWRITE_BACKEND=x\nREWRITE_BACKE
 eq("spacing: `REWRITE_BACKEND = ollama ` parsed", item(menu(), "Backend:").title, "Backend: ollama")
 clickOption(item(menu(), "Backend:").menu, "Claude")
 eq("comment/other-key lines survive, spaced assignment replaced", readEnv(), "# REWRITE_BACKEND=kimi (old note)\nMY_REWRITE_BACKEND=x\nREWRITE_BACKEND=claude\n")
+
+-- 6b. write failure (temp path blocked by a directory): real file untouched, error alert, no success alert
+writeEnv("KIMI_API_KEY=abc\nREWRITE_BACKEND=claude\n")
+os.execute("mkdir -p '" .. ENV .. ".tmp'")
+local before = #S.alerts
+clickOption(item(menu(), "Backend:").menu, "Kimi")
+eq("write failure: env file unchanged (not truncated)", readEnv(), "KIMI_API_KEY=abc\nREWRITE_BACKEND=claude\n")
+eq("write failure: one error alert, no 'backend:' alert", #S.alerts - before .. "|" .. S.alerts[#S.alerts],
+  "1|revoice: couldn't update " .. ENV .. " — settings left unchanged")
+eq("write failure: menu still shows the old backend", item(menu(), "Backend:").title, "Backend: claude")
+os.execute("rm -rf '" .. ENV .. ".tmp'")
 
 -- 7. Run doctor: node task with --doctor, login env set before start, output shown in a blocking dialog
 S.tasks = {}; S.dialogs = {}
