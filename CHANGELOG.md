@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Codex / GPT-6 Astra backend** (`--backend codex`): rewrites through your ChatGPT subscription via the Codex CLI (`codex exec`, default model `gpt-6-astra`, `model_reasoning_effort=low`). Options: `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_TIMEOUT_MS`.
 - **Reply mode** (⌃⇧R): screenshots the frontmost window, asks what you want to say, and drafts the reply in your voice from the on-screen conversation plus your notes (empty notes = infer). Lands in the usual preview. CLI: `revoice --reply [--context TEXT] [--image FILE]...` with notes on stdin. Codex/Astra reads the screenshot natively (`--image`); Claude gets the path with `--allowedTools Read`; Kimi/Ollama receive it as an image part (vision model required). Needs the Screen Recording permission for Hammerspoon; screenshots are deleted from `~/.revoice/tmp` after the run.
 - **`REWRITE_BACKEND`** setting (env or `~/.revoice/env`) to choose the default backend or reorder the fallback chain used by the hotkeys, e.g. `REWRITE_BACKEND=codex,claude,kimi,ollama` makes Astra the default. `--backend` accepts the same comma-separated chains.
+- **Test suite + CI**: `npm test` runs the CLI and Hammerspoon-module suites (`test/`) on Linux with no API keys; GitHub Actions runs them on Node 18/20/22 for every PR.
 - **`revoice --doctor`**: shows the effective backend chain, where `codex`/`claude` resolve (or why not), Kimi key state, Ollama target, and the `PATH` the CLI sees. Exit 0 when at least one non-Ollama backend is usable.
 
 ### Changed
@@ -42,5 +43,5 @@ First public release.
 - **Zero-dependency Node CLI** (`revoice`), usable standalone: `echo "text" | revoice`.
 - Installer (`install.sh`) that sets up Hammerspoon, the CLI, prompts, styles, and skills, and migrates config from the tool's pre-release `~/.spiral-rewrite` layout.
 
-[Unreleased]: https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool-/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool-/releases/tag/v1.0.0
+[Unreleased]: https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool/releases/tag/v1.0.0

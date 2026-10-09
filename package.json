@@ -1,15 +1,19 @@
 {
   "name": "revoice",
   "version": "1.0.0",
-  "description": "Select text anywhere on macOS, hit a hotkey, get it rewritten in your own voice — via Claude Code, Codex (GPT-6 Astra), any OpenAI-compatible API (Kimi), or a local Ollama model, with a rewrite prompt you fully control.",
+  "description": "Select text anywhere on macOS, hit a hotkey, get it rewritten in your own voice \u2014 via Claude Code, Codex (GPT-6 Astra), any OpenAI-compatible API (Kimi), or a local Ollama model, with a rewrite prompt you fully control.",
   "license": "MIT",
   "type": "module",
   "bin": {
     "revoice": "./bin/revoice.js"
   },
+  "scripts": {
+    "test": "node test/run.mjs",
+    "check": "node --check bin/revoice.js && luac -p hammerspoon/revoice.lua && bash -n install.sh"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool-.git"
+    "url": "git+https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool.git"
   },
   "keywords": [
     "macos",
