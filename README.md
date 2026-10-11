@@ -6,6 +6,7 @@
 
 **Select text. Hit a hotkey. It's rewritten in your voice — right where you typed it.**
 
+[![CI](https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool/actions/workflows/ci.yml/badge.svg)](https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS-blue)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)
@@ -69,7 +70,7 @@ This is the part that makes revoice different:
 ## Get started (2 minutes)
 
 ```bash
-git clone https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool-.git revoice
+git clone https://github.com/jdanjohnson/Revoice-AI-Rewriting-Tool.git revoice
 cd revoice
 ./install.sh
 ```
