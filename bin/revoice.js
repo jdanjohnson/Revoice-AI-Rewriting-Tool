@@ -5,11 +5,13 @@
  * Backend order (auto):
  *   1. Claude Code CLI (your Claude subscription, fully promptable)
  *   2. Codex CLI (your ChatGPT subscription; default model gpt-6-astra)
- *   3. Kimi / any OpenAI-compatible API (if KIMI_API_KEY is set)
- *   4. Ollama (local model, default: llama3.2:3b)
+ *   3. OpenAI API (paid per token, if OPENAI_API_KEY is set; default gpt-6-astra, streams)
+ *   4. Kimi / any OpenAI-compatible API (if KIMI_API_KEY is set)
+ *   5. Ollama (local model, default: llama3.2:3b)
  *
  * Reorder or restrict the chain with REWRITE_BACKEND, e.g.
  *   REWRITE_BACKEND=codex,claude,kimi,ollama   (Astra first)
+ *   REWRITE_BACKEND=openai                     (API only: fast, streams, paid)
  *
  * The rewrite prompt is editable: ~/.revoice/prompt.txt
  * (or REWRITE_PROMPT_FILE).
@@ -17,19 +19,20 @@
  * Usage:
  *   echo "some text" | revoice
  *   echo "some text" | revoice --instruction "make it shorter"
- *   echo "text" | revoice --backend claude|codex|kimi|ollama
+ *   echo "text" | revoice --backend claude|codex|openai|kimi|ollama
  *
  * Reply mode (draft a reply instead of rewriting): stdin is your rough notes
  * (may be empty), --context is the message you're replying to, --image is a
- * screenshot of the conversation (Codex/Astra reads it; Kimi/Ollama get it as
+ * screenshot of the conversation (Codex/Astra reads it; OpenAI/Kimi/Ollama get it as
  * an image part, Claude gets the path to Read).
  *   echo "yes but not before friday" | revoice --reply --image thread.png
  *
  * Env vars:
  *   REWRITE_PROMPT_FILE (default ~/.revoice/prompt.txt)
- *   REWRITE_BACKEND  (default claude,codex,kimi,ollama)
+ *   REWRITE_BACKEND  (default claude,codex,openai,kimi,ollama)
  *   CLAUDE_BIN, CLAUDE_MODEL, CLAUDE_TIMEOUT_MS
  *   CODEX_BIN, CODEX_MODEL (default gpt-6-astra), CODEX_REASONING_EFFORT (default low), CODEX_TIMEOUT_MS
+ *   OPENAI_API_URL (default https://api.openai.com/v1), OPENAI_API_KEY, OPENAI_MODEL (default gpt-6-astra), OPENAI_REASONING_EFFORT (default low)
  *   KIMI_API_URL (default https://api.moonshot.ai/v1), KIMI_API_KEY, KIMI_MODEL, KIMI_TEMPERATURE
  *   OLLAMA_URL       (default http://127.0.0.1:11434)
  *   OLLAMA_MODEL     (default llama3.2:3b)
@@ -607,6 +610,27 @@ const KIMI_TEMPERATURE = Number.isFinite(parsedKimiTemp) ? parsedKimiTemp : null
 if (rawKimiTemp !== "" && KIMI_TEMPERATURE === null)
   console.error(`revoice: ignoring invalid KIMI_TEMPERATURE "${rawKimiTemp}"`);
 
+// Native OpenAI API (paid per token) — the fast, streaming alternative to the
+// Codex CLI, which uses the ChatGPT subscription but can't stream.
+const OPENAI_API_URL = (process.env.OPENAI_API_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-6-astra";
+// "off" omits the field entirely (for OPENAI_MODEL set to a non-reasoning model).
+const OPENAI_REASONING_EFFORTS = ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const rawOpenaiEffort = (process.env.OPENAI_REASONING_EFFORT ?? "low").trim().toLowerCase();
+const OPENAI_REASONING_EFFORT = OPENAI_REASONING_EFFORTS.includes(rawOpenaiEffort) ? rawOpenaiEffort : "low";
+if (rawOpenaiEffort !== OPENAI_REASONING_EFFORT)
+  console.error(`revoice: ignoring invalid OPENAI_REASONING_EFFORT "${rawOpenaiEffort}" (use ${OPENAI_REASONING_EFFORTS.join("|")})`);
+
+const KIMI_PROVIDER = {
+  name: "Kimi", keyVar: "KIMI_API_KEY", url: KIMI_API_URL, key: KIMI_API_KEY, model: KIMI_MODEL,
+  extra: () => (KIMI_TEMPERATURE !== null ? { temperature: KIMI_TEMPERATURE } : {}),
+};
+const OPENAI_PROVIDER = {
+  name: "OpenAI", keyVar: "OPENAI_API_KEY", url: OPENAI_API_URL, key: OPENAI_API_KEY, model: OPENAI_MODEL,
+  extra: () => (OPENAI_REASONING_EFFORT === "off" ? {} : { reasoning_effort: OPENAI_REASONING_EFFORT }),
+};
+
 function findClaude() {
   if (process.env.CLAUDE_BIN && fs.existsSync(process.env.CLAUDE_BIN))
     return process.env.CLAUDE_BIN;
@@ -756,10 +780,11 @@ function codexErrorSummary(stderr) {
   return (pick || "empty output").slice(0, 300);
 }
 
-async function rewriteWithKimi(text, instruction, onChunk, task) {
-  if (!KIMI_API_KEY) throw new Error("KIMI_API_KEY not set");
+// Chat Completions over any OpenAI-compatible endpoint (OpenAI itself, Moonshot/Kimi, …).
+async function rewriteWithChatCompletions(p, text, instruction, onChunk, task, signal) {
+  if (!p.key) throw new Error(`${p.keyVar} not set`);
   const system = buildSystemPrompt(instruction);
-  const url = `${KIMI_API_URL}/chat/completions`;
+  const url = `${p.url}/chat/completions`;
   const userText = buildUserMessage(text, task);
   // OpenAI vision format: content becomes an array of parts when images are attached
   const userContent = task.images.length
@@ -772,35 +797,38 @@ async function rewriteWithKimi(text, instruction, onChunk, task) {
   try {
     res = await fetch(url, {
       method: "POST",
+      signal,
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${KIMI_API_KEY}`,
+        authorization: `Bearer ${p.key}`,
       },
       body: JSON.stringify({
-        model: KIMI_MODEL,
+        model: p.model,
         messages: [
           { role: "system", content: system },
           { role: "user", content: userContent },
         ],
         ...(onChunk && { stream: true }),
-        ...(KIMI_TEMPERATURE !== null && { temperature: KIMI_TEMPERATURE }),
+        ...p.extra(),
       }),
     });
   } catch (e) {
-    throw new Error(`Kimi request to ${url} failed: ${e?.cause?.code || e.message}`);
+    throw new Error(`${p.name} request to ${url} failed: ${e?.cause?.code || e?.cause?.errors?.[0]?.code || e.message}`);
   }
-  if (!res.ok) throw new Error(`Kimi API ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) throw new Error(`${p.name} API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   if (onChunk) {
     // OpenAI-compatible SSE stream: `data: {json}` lines, ends with [DONE]
-    let full = "", buf = "";
+    let full = "", buf = "", done = false;
     const decoder = new TextDecoder();
     for await (const chunk of res.body) {
+      if (signal?.aborted) break;
       buf += decoder.decode(chunk, { stream: true });
       const lines = buf.split("\n");
       buf = lines.pop();
       for (const line of lines) {
         const m = line.match(/^data:\s*(.*)$/);
-        if (!m || m[1] === "[DONE]") continue;
+        if (!m) continue;
+        if (m[1] === "[DONE]") { done = true; continue; }
         try {
           const delta = JSON.parse(m[1])?.choices?.[0]?.delta?.content;
           if (delta) {
@@ -812,7 +840,8 @@ async function rewriteWithKimi(text, instruction, onChunk, task) {
     }
     // flush a trailing line the provider didn't newline-terminate
     const m = buf.match(/^data:\s*(.*)$/);
-    if (m && m[1] !== "[DONE]") {
+    if (m && m[1] === "[DONE]") done = true;
+    else if (m) {
       try {
         const delta = JSON.parse(m[1])?.choices?.[0]?.delta?.content;
         if (delta) {
@@ -821,17 +850,18 @@ async function rewriteWithKimi(text, instruction, onChunk, task) {
         }
       } catch {}
     }
+    if (!done) throw new Error(`${p.name} stream ended before [DONE]`);
     const out = full.trim();
-    if (!out) throw new Error("Kimi returned empty result");
+    if (!out) throw new Error(`${p.name} returned empty result`);
     return out;
   }
   const data = await res.json();
   const out = data?.choices?.[0]?.message?.content?.trim();
-  if (!out) throw new Error("Kimi returned empty result");
+  if (!out) throw new Error(`${p.name} returned empty result`);
   return out;
 }
 
-const BACKENDS = ["claude", "codex", "kimi", "ollama"];
+const BACKENDS = ["claude", "codex", "openai", "kimi", "ollama"];
 const DEFAULT_CHAIN = BACKENDS;
 
 // Resolve `--backend` (or REWRITE_BACKEND when --backend is omitted) into an
@@ -924,10 +954,11 @@ function parseArgs(argv) {
       console.log(`backend chain: ${chain.join(" → ")}  (REWRITE_BACKEND=${process.env.REWRITE_BACKEND || "<unset>"})`);
       console.log(`codex:  ${codex ? `${codex}  (model ${CODEX_MODEL})` : "NOT FOUND — npm i -g @openai/codex, or set CODEX_BIN in ~/.revoice/env"}`);
       console.log(`claude: ${claude || "NOT FOUND — npm i -g @anthropic-ai/claude-code, or set CLAUDE_BIN in ~/.revoice/env"}`);
+      console.log(`openai: ${OPENAI_API_KEY ? `key set  (${OPENAI_API_URL}, model ${OPENAI_MODEL}, effort ${OPENAI_REASONING_EFFORT})` : "no OPENAI_API_KEY (optional: paid API, faster than codex)"}`);
       console.log(`kimi:   ${process.env.KIMI_API_KEY ? `key set  (${KIMI_API_URL}, model ${KIMI_MODEL})` : "no KIMI_API_KEY"}`);
       console.log(`ollama: ${OLLAMA_URL}  (model ${OLLAMA_MODEL}, prompt ${OLLAMA_PROMPT})`);
       console.log(`PATH:   ${process.env.PATH || ""}`);
-      process.exit(codex || claude || process.env.KIMI_API_KEY ? 0 : 1);
+      process.exit(codex || claude || OPENAI_API_KEY || process.env.KIMI_API_KEY ? 0 : 1);
     } else if (a === "--skills") {
       const skills = loadSkills();
       if (!skills.length) console.log(`No skills loaded (put .md files in ${SKILLS_DIR})`);
@@ -942,7 +973,7 @@ function parseArgs(argv) {
     }
     else if (a === "--help" || a === "-h") {
       console.log(
-        "Usage: echo TEXT | revoice [--backend auto|claude|codex|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills] [--doctor]\n" +
+        "Usage: echo TEXT | revoice [--backend auto|claude|codex|openai|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills] [--doctor]\n" +
         "       echo NOTES | revoice --reply [--context TEXT] [--image FILE]...   (draft a reply in your voice; NOTES may be empty)"
       );
       process.exit(0);
@@ -1067,15 +1098,22 @@ async function main() {
     }
   }
 
+  // a timed-out API request is aborted so its late chunks can't bleed into the next backend's output
+  const chatApi = (p) => {
+    const ac = new AbortController();
+    return withTimeout(rewriteWithChatCompletions(p, text, args.instruction, onChunk, task, ac.signal), remaining(10000), p.name, () => ac.abort());
+  };
   const runners = {
     claude: () => rewriteWithClaude(text, args.instruction, cliBudget("CLAUDE_TIMEOUT_MS"), task),
     codex: () => rewriteWithCodex(text, args.instruction, cliBudget("CODEX_TIMEOUT_MS"), task),
-    kimi: () => withTimeout(rewriteWithKimi(text, args.instruction, onChunk, task), remaining(10000), "Kimi"),
+    openai: () => chatApi(OPENAI_PROVIDER),
+    kimi: () => chatApi(KIMI_PROVIDER),
     ollama: () => withTimeout(rewriteWithOllama(text, args.instruction, task), remaining(10000), "Ollama"),
   };
 
   for (const backend of chain) {
-    // Kimi only joins an automatic chain when it's actually configured.
+    // API backends only join an automatic chain when their key is configured.
+    if (backend === "openai" && !OPENAI_API_KEY && !explicit) continue;
     if (backend === "kimi" && !KIMI_API_KEY && !explicit) continue;
     if (backend === "ollama" && errors.length)
       console.error(`revoice: ${errors.join("; ")} — falling back to local Ollama (${OLLAMA_MODEL})`);

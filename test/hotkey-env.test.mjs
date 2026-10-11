@@ -53,7 +53,7 @@ eq("A3 quoted/export/comment parsing", [line(r.out, "backend chain"), line(r.out
 // A4: no env file → auto chain
 h = mk(null);
 r = run(h, ["--doctor"]);
-eq("A4 missing env file → auto chain", line(r.out, "backend chain"), "backend chain: claude → codex → kimi → ollama  (REWRITE_BACKEND=<unset>)");
+eq("A4 missing env file → auto chain", line(r.out, "backend chain"), "backend chain: claude → codex → openai → kimi → ollama  (REWRITE_BACKEND=<unset>)");
 
 // B1: bare PATH, nothing installed → NOT FOUND + exit 1 (what Hammerspoon saw)
 h = mk("REWRITE_BACKEND=codex\n");
