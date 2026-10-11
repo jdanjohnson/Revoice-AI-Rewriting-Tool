@@ -146,3 +146,10 @@ May also live in `~/.revoice/env` (quote values that contain ` #`). Real environ
 ## Testing
 
 `npm test` runs the full suite (CLI against fake codex/claude/OpenAI/Kimi/Ollama, plus the Hammerspoon module under a stub `hs`) on Linux with no API keys — see [CONTRIBUTING.md](../CONTRIBUTING.md). CI runs it on Node 18/20/22. `test/fake-ollama-server.js` is a standalone fake Ollama for poking at the CLI by hand.
+
+## Installing & updating
+
+- `./install.sh` from a checkout copies `bin/revoice.js` + `package.json` into `~/.revoice`, links `revoice` onto PATH, wires `~/.hammerspoon/revoice.lua`, and records the checkout path in `~/.revoice/src-path`.
+- Piped (`curl -fsSL https://raw.githubusercontent.com/jdanjohnson/Revoice-AI-Rewriting-Tool/main/install.sh | bash`): there is no checkout next to the script, so it shallow-clones `REVOICE_REPO` (default: this repo) into `~/.revoice/src` — or `git pull --ff-only` if that already exists — and re-executes `~/.revoice/src/install.sh`.
+- `revoice --update`: reads `~/.revoice/src-path`, runs `git pull --ff-only` there, then re-runs that checkout's `install.sh` (exit code propagated). Fails with a hint if the path is missing, has no `install.sh`, or is not a git checkout.
+
