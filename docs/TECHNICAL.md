@@ -11,7 +11,7 @@ Hammerspoon hotkey
       1. Claude Code CLI (your Claude subscription — your own prompt)
       2. Codex CLI (your ChatGPT subscription, default model gpt-6-astra — your own prompt)
       3. Kimi / any OpenAI-compatible API (if KIMI_API_KEY is set — your own prompt)
-      4. Ollama at localhost:11434 (local, default model llama3.2:3b — your own prompt)
+      4. Ollama at localhost:11434 (local, default model llama3.2:3b — compact prompt, see below)
      (reorder with REWRITE_BACKEND, e.g. codex,claude,kimi,ollama)
   → streams the rewrite into the liquid-glass HUD
   → shows a preview popover — ⏎ pastes over the selection, esc keeps the original
@@ -37,7 +37,7 @@ Re-running it is safe (idempotent); it never overwrites files you've edited.
 
 Every rewrite prompt is assembled from, in order:
 
-1. **The rewrite prompt** — `~/.revoice/prompt.txt` (or a style file, see below). All backends use it. Override the path with `REWRITE_PROMPT_FILE`.
+1. **The rewrite prompt** — `~/.revoice/prompt.txt` (or a style file, see below). Claude, Codex and Kimi use it; Ollama only with `OLLAMA_PROMPT=full` (by default it gets a short rewrite-only prompt plus the active style and instruction, because small local models can't follow the full guide — see Backends). Override the path with `REWRITE_PROMPT_FILE`.
 2. **Agent skills** — every `.md` file in `~/.revoice/skills/` (YAML frontmatter stripped) is appended as strict rules. Two anti-AI-slop skills ship by default. `revoice --skills` lists what's loaded; `SKILLS_MAX_CHARS` (default 16000) caps the total.
 3. **Voice samples** — `~/.revoice/voice-samples.txt`, samples separated by `---` lines, included as few-shot style examples ("imitate the style, not the content"). `VOICE_MAX_CHARS` (default 6000) caps how much is sent.
 4. **Negative examples** — the last few rejected rewrites from history, as "don't write like this" examples. `REJECTED_EXAMPLES_MAX` (default 3, 0 disables).
@@ -67,7 +67,7 @@ In `auto` mode (the hotkeys) the CLI tries Claude → Codex → Kimi → Ollama;
 - **Claude**: `npm i -g @anthropic-ai/claude-code`, then run `claude` once to sign in. Options: `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_MS`.
 - **Codex / GPT-6 Astra**: `npm i -g @openai/codex` (≥ 0.153), then run `codex` once to sign in with your ChatGPT account (Plus/Pro/Business). revoice runs `codex exec --ephemeral --sandbox read-only --model gpt-6-astra -c model_reasoning_effort="low"` and reads the final message via `--output-last-message`, so Codex's progress output never reaches the paste. Options: `CODEX_BIN`, `CODEX_MODEL` (default `gpt-6-astra`), `CODEX_REASONING_EFFORT` (default `low` — raise to `medium`/`high` for long strategy docs, at the cost of latency), `CODEX_TIMEOUT_MS`. Prefer the API instead? Astra is also reachable through the OpenAI-compatible backend below: `KIMI_API_URL=https://api.openai.com/v1`, `KIMI_API_KEY=sk-...`, `KIMI_MODEL=gpt-6-astra` (paid per token, but streams into the HUD).
 - **Kimi / any OpenAI-compatible API**: put `KIMI_API_KEY=sk-...` (from platform.moonshot.ai) in `~/.revoice/env` — that file is loaded by the CLI even when launched from the hotkey. Options: `KIMI_MODEL` (default `moonshot-v1-auto`), `KIMI_API_URL` (point it at any OpenAI-compatible endpoint), `KIMI_TEMPERATURE` (unset by default — Moonshot's `kimi-k*` models reject non-default temperatures).
-- **Ollama (local/free)**: `brew install ollama && ollama pull llama3.2:3b` (~2 GB, fast on Apple Silicon). Options: `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` (default 8192).
+- **Ollama (local/free)**: `brew install ollama && ollama pull llama3.2:3b` (~2 GB, fast on Apple Silicon). Options: `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` (default 8192), `OLLAMA_PROMPT` (`compact` default / `full`). Small local models can't follow the full voice guide + skills + samples — they answer the draft instead of rewriting it — so Ollama gets a short rewrite-only prompt (plus the active style and any instruction) unless you set `OLLAMA_PROMPT=full` for a bigger model (e.g. `OLLAMA_MODEL=llama3.1:8b`). Output that only echoes the draft is treated as a failure, never pasted. When an automatic chain ends up on Ollama because the others failed, the CLI says so on stderr (`revoice: codex: … — falling back to local Ollama`).
 
 ## Reply mode (⌃⇧R)
 
@@ -79,7 +79,7 @@ The rewrite hotkeys only ever see the text you selected. Reply mode adds the con
 4. The CLI runs `revoice --reply --image <png> [--context <sel>]` with the notes on stdin, using the same style/backend/skills/voice samples as a rewrite.
 5. The result lands in the normal preview (⏎ paste, R regenerate, 1–4 restyle, esc discard). Regenerate/restyle reuse the same screenshot; screenshots older than two minutes are deleted from `~/.revoice/tmp` when a run finishes.
 
-Prompt-wise, the system prompt is unchanged (voice guide → skills → rejected examples → samples → instruction). The task message is a *reply brief* instead of the draft block: it states that reply mode overrides the "never reply" rewrite rule, carries the conversation context and your notes, forbids inventing facts/dates/commitments, and asks for only the send-ready reply.
+Prompt-wise, the system prompt is unchanged for Claude/Codex/Kimi (voice guide → skills → rejected examples → samples → instruction); compact-mode Ollama gets a short reply-drafting prompt instead of its rewrite-only one. The task message is a *reply brief* instead of the draft block: it states that reply mode overrides the "never reply" rewrite rule, carries the conversation context and your notes, forbids inventing facts/dates/commitments, and asks for only the send-ready reply.
 
 How each backend receives the screenshot:
 
@@ -105,7 +105,7 @@ echo "some text" | revoice --backend kimi         # Kimi only
 echo "some text" | revoice --backend ollama       # local only
 revoice --skills                                  # list loaded agent skills
 revoice --doctor                                  # which backends resolve, effective chain, PATH the CLI sees
-echo "some text" | revoice --stream               # stream output chunks as they arrive (Kimi/Ollama)
+echo "some text" | revoice --stream               # stream output chunks as they arrive (Kimi; Ollama is buffered so its output can be checked first)
 echo "some text" | revoice --log-history          # record the rewrite in ~/.revoice/history.jsonl
 revoice --history                                 # print recent rewrites (newest first)
 revoice --mark-last accepted|rejected             # record the outcome of the last rewrite
@@ -135,7 +135,7 @@ May also live in `~/.revoice/env` (quote values that contain ` #`). Real environ
 
 - macOS only: the global hotkeys, selection capture, and paste rely on Hammerspoon. The CLI itself is portable Node and works anywhere.
 - Works in any app that supports ⌘C/⌘V (Mail, Slack, browsers, editors).
-- The Claude Code and Codex CLIs can't stream, so their rewrites show the animated HUD and then pop straight into the preview; Kimi/Ollama stream live. Both CLIs also add a few seconds of startup per rewrite.
+- The Claude Code and Codex CLIs can't stream, so their rewrites show the animated HUD and then pop straight into the preview; Kimi streams live; Ollama is buffered (its output is cleaned and checked before anything is shown). Both CLIs also add a few seconds of startup per rewrite.
 
 ## Testing
 

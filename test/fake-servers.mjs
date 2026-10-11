@@ -11,8 +11,11 @@ createServer((req, res) => {
     fs.appendFileSync(`${T}/ollama.log`, body + "\n");
     const parsed = JSON.parse(body);
     const userMsg = parsed.messages.find((m) => m.role === "user");
+    // canned reply: tests write ${T}/ollama.reply to control the model's answer verbatim
+    let content = `OLLAMA: ${userMsg.content}`;
+    try { content = fs.readFileSync(`${T}/ollama.reply`, "utf8"); } catch {}
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ message: { role: "assistant", content: `OLLAMA: ${userMsg.content}` } }));
+    res.end(JSON.stringify({ message: { role: "assistant", content } }));
   });
 }).listen(4711);
 

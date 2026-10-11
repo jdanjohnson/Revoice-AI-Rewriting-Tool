@@ -49,7 +49,7 @@ eq("A2 process env overrides file", line(r.out, "backend chain"), "backend chain
 h = mk('export REWRITE_BACKEND="claude" # try first\nOLLAMA_MODEL=qwen:7b   # small\n');
 r = run(h, ["--doctor"]);
 eq("A3 quoted/export/comment parsing", [line(r.out, "backend chain"), line(r.out, "ollama:")],
-  ["backend chain: claude  (REWRITE_BACKEND=claude)", "ollama: http://127.0.0.1:11434  (model qwen:7b)"]);
+  ["backend chain: claude  (REWRITE_BACKEND=claude)", "ollama: http://127.0.0.1:11434  (model qwen:7b, prompt compact)"]);
 // A4: no env file → auto chain
 h = mk(null);
 r = run(h, ["--doctor"]);

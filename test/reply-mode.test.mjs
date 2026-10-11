@@ -234,10 +234,11 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
   eq("ollama reply: user message = brief + images[base64]",
     ollamaBodies()[0].messages[1],
     { role: "user", content: brief({ notes: NOTES, img: true }), images: [PNG_BYTES.toString("base64")] });
-  eq("ollama reply: system unchanged", ollamaBodies()[0].messages[0], { role: "system", content: SYS });
+  eq("ollama reply: compact reply system prompt (no never-reply rule)",
+    [ollamaBodies()[0].messages[0].role, ollamaBodies()[0].messages[0].content.startsWith("You are drafting a message on behalf of the author")], ["system", true]);
   r = run(NOTES, ["--backend", "ollama"]);
-  eq("ollama plain rewrite: no images key, content = draft",
-    ollamaBodies()[0].messages[1], { role: "user", content: NOTES });
+  eq("ollama plain rewrite: no images key, content = framed draft",
+    ollamaBodies()[0].messages[1], { role: "user", content: "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + NOTES });
 }
 // ---- 10. history logging in reply mode --------------------------------------------------
 {
