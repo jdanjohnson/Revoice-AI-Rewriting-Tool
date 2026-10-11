@@ -133,7 +133,7 @@ May also live in `~/.revoice/env` (quote values that contain ` #`). Real environ
 
 ## Troubleshooting
 
-**HUD says `ollama` (or the wrong backend) but the terminal works.** The hotkeys run the same CLI, but under Hammerspoon's environment. Run `revoice --doctor` in Terminal: it prints the effective chain, where `codex`/`claude` were found, and the `PATH` in use. Then Hammerspoon menu → Reload Config (the module caches your login-shell `PATH` at load). If the binaries live somewhere unusual, set `CODEX_BIN=/full/path/to/codex` / `CLAUDE_BIN=...` in `~/.revoice/env`. If `~/.revoice/env` has several `REWRITE_BACKEND=` lines, the last one wins.
+**HUD says `ollama` (or the wrong backend) but the terminal works.** The hotkeys run the same CLI, but under Hammerspoon's environment. Run `revoice --doctor` in Terminal: it prints the effective chain, where `codex`/`claude` were found, and the `PATH` in use. The same report is one click away as ✍️ menu → **Run doctor**, and ✍️ → **Backend** switches `REWRITE_BACKEND` in `~/.revoice/env` without opening a terminal (Auto removes the line; other lines in the file are left alone). Then Hammerspoon menu → Reload Config (the module caches your login-shell `PATH` at load). If the binaries live somewhere unusual, set `CODEX_BIN=/full/path/to/codex` / `CLAUDE_BIN=...` in `~/.revoice/env`. If `~/.revoice/env` has several `REWRITE_BACKEND=` lines, the last one wins.
 
 ## Limitations
 

@@ -85,6 +85,8 @@ Then open Hammerspoon, grant it **Accessibility** permission (System Settings �
 - **Kimi** (or any OpenAI-compatible API) — drop `KIMI_API_KEY=sk-...` into `~/.revoice/env`.
 - **Totally free & private** — `brew install ollama && ollama pull llama3.2:3b` and everything runs on your Mac. Nothing leaves your machine.
 
+Switch between them anytime from the ✍️ menu-bar icon → **Backend** (no config files needed), and if a hotkey ever misbehaves, ✍️ → **Run doctor** tells you why.
+
 Select some text, press **⌃⇧Z**, and enjoy.
 
 ## Who made this
