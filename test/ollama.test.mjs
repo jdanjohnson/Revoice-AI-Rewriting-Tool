@@ -20,6 +20,12 @@ const RV = path.join(HOME, ".revoice");
 fs.mkdirSync(path.join(RV, "skills"), { recursive: true });
 fs.mkdirSync(path.join(RV, "styles"));
 fs.writeFileSync(path.join(RV, "prompt.txt"), "FULL VOICE GUIDE: write like the author.");
+// the full prompt (not the compact Ollama one) ends with the ambiguity-flag instruction
+const FLAGS_INSTRUCTION =
+  "\n\nAfter the rewrite, if — and only if — the draft contains an ambiguity that could " +
+  "materially change its meaning (who, what, when, how much), add ONE final line in exactly " +
+  "this form, each ambiguity as a short phrase:\nFLAGS: <ambiguity> | <ambiguity>\n" +
+  "If nothing could change the meaning, add nothing after the rewrite.";
 fs.writeFileSync(path.join(RV, "skills", "no-slop.md"), "# no-slop\nNever say delve.");
 fs.writeFileSync(path.join(RV, "voice-samples.txt"), "sample one\n---\nsample two");
 fs.writeFileSync(path.join(RV, "history.jsonl"), JSON.stringify({ ts: "2026-01-01T00:00:00Z", original: "o", rewrite: "a rejected rewrite", outcome: "rejected" }) + "\n");
@@ -90,7 +96,7 @@ const eq = (name, a, b) => {
 {
   run(DRAFT, ["--backend", "ollama", "--instruction", "shorter"], { OLLAMA_PROMPT: "full" });
   const s = sys();
-  eq("full: voice guide + skill + samples + rejected + instruction present", [s.startsWith("FULL VOICE GUIDE"), s.includes("Never say delve"), s.includes("EXAMPLE 2:\nsample two"), s.includes("REJECTED REWRITE 1:\na rejected rewrite"), s.endsWith("Additional instruction: shorter")], [true, true, true, true, true]);
+  eq("full: voice guide + skill + samples + rejected + instruction present", [s.startsWith("FULL VOICE GUIDE"), s.includes("Never say delve"), s.includes("EXAMPLE 2:\nsample two"), s.includes("REJECTED REWRITE 1:\na rejected rewrite"), s.endsWith("Additional instruction: shorter" + FLAGS_INSTRUCTION)], [true, true, true, true, true]);
   eq("full: user message still framed", user(), FRAMED);
   run(DRAFT, ["--backend", "ollama"], { OLLAMA_PROMPT: "FULL" });
   eq("OLLAMA_PROMPT other than exactly 'full' → compact", sys(), COMPACT);

@@ -66,6 +66,7 @@ This is the part that makes revoice different:
 - **Feed it your writing.** Paste a few of your real messages into `~/.revoice/voice-samples.txt` and every rewrite imitates *your* style — not generic AI-speak.
 - **No AI slop.** Two anti-slop rule packs ship by default (goodbye "I hope this finds you well" and "game-changing"). Drop in your own rules as simple markdown files.
 - **It learns.** Reject a rewrite and it's remembered as a "don't write like this" example next time.
+- **It flags what it wasn't sure about.** If your draft could be read two ways ("them" = legal or the client?), the preview shows a little ⚑ chip so you catch it before you paste.
 
 ## Get started (2 minutes)
 

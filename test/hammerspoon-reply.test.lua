@@ -33,7 +33,8 @@ local fakeImg = {
   saveToFile = function(_, path) local f = assert(io.open(path, "w")); f:write("PNGDATA"); f:close(); S.saved = path; return true end,
 }
 fakeWin.snapshot = function() if S.snapshotOk then return fakeImg end return nil end
-local wv = setmetatable({}, { __index = function() return function(self) return self end end })
+local wv = setmetatable({ html = function(self, h) S.html = h; return self end },
+  { __index = function() return function(self) return self end end })
 hs = {
   fs = {
     attributes = function(p) if not fileExists(p) then return nil end
@@ -47,7 +48,7 @@ hs = {
   json = { read = function() return nil end, encode = function(s) return '"' .. tostring(s) .. '"' end },
   window = { frontmostWindow = function() return fakeWin end },
   screen = { mainScreen = function() return { frame = function() return { x = 0, y = 0, w = 1440, h = 900 } end } end },
-  webview = { new = function() return wv end },
+  webview = { new = function(frame) S.frame = frame; return wv end },
   canvas = { windowLevels = { overlay = 1 }, new = function() return { minimumTextSize = function() return { h = 40 } end, delete = function() end } end },
   styledtext = { new = function() return {} end },
   timer = {
@@ -138,6 +139,27 @@ S.hotkeys["r"]()
 S.tasks[1].done(1, "", "codex exited 1: ERROR: boom")
 check("R failure: alert says Reply failed", S.alerts[#S.alerts]:match("^Reply failed: codex exited 1"), S.alerts[#S.alerts])
 eq("R failure: clipboard restored", S.clipboard, "OLD")
+
+
+-- flags: `flag:` lines on stderr become amber chips in the preview; none -> no chips, same height
+reset(); S.selection = "send it to them by friday"; S.clipboard = "OLD"; S.dialog = { "Draft reply", "" }
+S.hotkeys["z"]()
+S.tasks[1].done(0, "Send it to them by Friday.", "via:codex\n")
+for _, fn in ipairs(S.deferred) do fn() end
+local plainH = S.frame and S.frame.h
+check("flags: no flag lines -> no chips", S.html and not S.html:find('class="flag"', 1, true), S.html and S.html:sub(1, 200))
+reset(); S.hotkeys["z"]()
+S.tasks[1].done(0, "Send it to them by Friday.", "via:openai\nflag:who is \"them\" <legal> or the client?\nflag:this Friday or next?\n")
+for _, fn in ipairs(S.deferred) do fn() end
+check("flags: two chips rendered in order",
+  S.html and S.html:find('<span class="flag">⚑ who is "them" &lt;legal&gt; or the client?</span><span class="flag">⚑ this Friday or next?</span>', 1, true) ~= nil,
+  S.html and S.html:match('<div class="flags">.-</div>'))
+check("flags: chips sit between the rewrite and the key hints", S.html and (S.html:find('class="flags"', 1, true) > S.html:find('class="body"', 1, true)) and (S.html:find('class="flags"', 1, true) < S.html:find('class="hints"', 1, true)), S.html and S.html:sub(-400))
+eq("flags: card grows by one chip row (36px) for two flags", S.frame and plainH and (S.frame.h - plainH), 36)
+reset(); S.hotkeys["z"]()
+S.tasks[1].done(0, string.rep("long line of rewritten text that fills the card\n", 60), "via:openai\nflag:a\nflag:b\nflag:c\n")
+for _, fn in ipairs(S.deferred) do fn() end
+eq("flags: chip rows are added on top of the 60% screen cap (never clipped)", S.frame and S.frame.h, 150 + 72)  -- stub text height 40 -> 150 floor; 3 flags = 2 rows
 
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

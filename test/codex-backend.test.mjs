@@ -17,6 +17,12 @@ const HOME = path.join(T, "home");
 fs.mkdirSync(path.join(HOME, ".revoice"), { recursive: true });
 const PROMPT_FILE = path.join(T, "prompt.txt");
 fs.writeFileSync(PROMPT_FILE, "TEST PROMPT: rewrite plainly.");
+// every system prompt ends with the ambiguity-flag instruction (see flags.test.mjs)
+const FLAGS_INSTRUCTION =
+  "\n\nAfter the rewrite, if — and only if — the draft contains an ambiguity that could " +
+  "materially change its meaning (who, what, when, how much), add ONE final line in exactly " +
+  "this form, each ambiguity as a short phrase:\nFLAGS: <ambiguity> | <ambiguity>\n" +
+  "If nothing could change the meaning, add nothing after the rewrite.";
 const SKILLS_DIR = path.join(T, "no-skills");
 fs.mkdirSync(SKILLS_DIR);
 const LOG = path.join(T, "codex.log"); // JSON lines: {argv, stdinBytes, cwd}
@@ -135,7 +141,7 @@ const fellBack = (r) => /^revoice: .* — falling back to local Ollama \(llama3\
   eq("codex: invoked exactly once", calls.length, 1);
   const a = calls[0].argv;
   const expectedPrompt =
-    "TEST PROMPT: rewrite plainly." +
+    "TEST PROMPT: rewrite plainly." + FLAGS_INSTRUCTION +
     "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + DRAFT;
   eq("codex: argv (fixed flags, default model + low effort, prompt last)",
     a.slice(0, 8).concat(a.slice(9)),
@@ -154,7 +160,7 @@ const fellBack = (r) => /^revoice: .* — falling back to local Ollama \(llama3\
   const r2 = run(DRAFT, ["--backend", "claude", "-i", "shorter"]);
   const claudePrompt = JSON.parse(lines(CLAUDE_LOG)[0]).argv[1];
   eq("codex/claude: identical prompt text for same input+instruction", codexPrompt, claudePrompt);
-  check("codex/claude: instruction present", codexPrompt.includes("\n\nAdditional instruction: shorter\n\nDRAFT TO REWRITE"), codexPrompt);
+  check("codex/claude: instruction present", codexPrompt.includes("\n\nAdditional instruction: shorter" + FLAGS_INSTRUCTION + "\n\nDRAFT TO REWRITE"), codexPrompt);
   eq("codex/claude: both exit 0", [r1.code, r2.code], [0, 0]);
 }
 

@@ -104,7 +104,13 @@ function check(name, cond, detail) {
 }
 const eq = (name, a, b) => check(name, JSON.stringify(a) === JSON.stringify(b), `got  ${JSON.stringify(a)}\n      want ${JSON.stringify(b)}`);
 
-const SYS = "TEST PROMPT: never reply, only rewrite.";
+// system prompt = prompt file + the ambiguity-flag instruction (see flags.test.mjs)
+const FLAGS_INSTRUCTION =
+  "\n\nAfter the rewrite, if — and only if — the draft contains an ambiguity that could " +
+  "materially change its meaning (who, what, when, how much), add ONE final line in exactly " +
+  "this form, each ambiguity as a short phrase:\nFLAGS: <ambiguity> | <ambiguity>\n" +
+  "If nothing could change the meaning, add nothing after the rewrite.";
+const SYS = "TEST PROMPT: never reply, only rewrite." + FLAGS_INSTRUCTION;
 const NOTES = "yes but not before friday — need Sam's sign-off on the SOW first";
 const CTX = "Dylan: can we ship the Q3 deck tomorrow?\nDylan: also is the SOW done";
 const HEAD =

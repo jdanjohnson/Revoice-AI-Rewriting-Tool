@@ -560,7 +560,7 @@ function cleanOllamaOutput(out, text, task) {
   if (!OLLAMA_PREAMBLE.test(text)) o = o.replace(OLLAMA_PREAMBLE, "");
   if (/^["“][^"“”]*["”]$/s.test(o) && !/^["“]/.test(text)) o = o.slice(1, -1).trim();
   if (!o) throw new Error("Ollama returned empty result");
-  if (!task.reply && normalizeText(o) === normalizeText(text))
+  if (!task.reply && normalizeText(splitFlags(o, text).rewrite) === normalizeText(text))
     throw new Error(`Ollama (${OLLAMA_MODEL}) returned the draft unchanged`);
   return o;
 }
@@ -569,6 +569,33 @@ function imageDataUrl(file) {
   const ext = path.extname(file).toLowerCase().replace(".", "");
   const mime = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" }[ext] || "image/png";
   return `data:${mime};base64,${fs.readFileSync(file).toString("base64")}`;
+}
+
+// Ambiguity flags: the model appends one `FLAGS:` line after the rewrite (only when the draft
+// could be read two ways); the CLI strips it from stdout and reports each flag on stderr as
+// `flag:<text>` so the preview can show them as chips without touching what gets pasted.
+const FLAGS_INSTRUCTION =
+  "\n\nAfter the rewrite, if — and only if — the draft contains an ambiguity that could " +
+  "materially change its meaning (who, what, when, how much), add ONE final line in exactly " +
+  "this form, each ambiguity as a short phrase:\nFLAGS: <ambiguity> | <ambiguity>\n" +
+  "If nothing could change the meaning, add nothing after the rewrite.";
+const FLAGS_LINE = /^\s*FLAGS?\s*:\s*(.*)$/i;
+// A partial line that could still turn into a FLAGS_LINE match
+const FLAGS_PREFIX = /^\s*(?:F|FL|FLA|FLAG|FLAGS)?\s*$/i;
+// If the draft itself has a `Flags:` line, the model is preserving content, not flagging.
+const draftHasFlagsLine = (draft) => (draft || "").split("\n").some((l) => FLAGS_LINE.test(l));
+
+function splitFlags(out, draft) {
+  if (draftHasFlagsLine(draft)) return { rewrite: out, flags: [] };
+  const lines = out.split("\n");
+  const i = lines.findLastIndex((l) => FLAGS_LINE.test(l));
+  if (i < 0) return { rewrite: out, flags: [] };
+  const tail = [lines[i].match(FLAGS_LINE)[1], ...lines.slice(i + 1)].join("\n");
+  const flags = tail
+    .split(/\s*\|\s*|\n\s*[-•*]\s+|\n+/)
+    .map((f) => f.trim())
+    .filter((f) => f && !/^(none|n\/a|no flags?)\.?$/i.test(f));
+  return { rewrite: lines.slice(0, i).join("\n").trimEnd(), flags };
 }
 
 function buildSystemPrompt(instruction) {
@@ -597,6 +624,7 @@ function buildSystemPrompt(instruction) {
     });
   }
   if (instruction) prompt += `\n\nAdditional instruction: ${instruction}`;
+  prompt += FLAGS_INSTRUCTION;
   return prompt;
 }
 
@@ -1059,14 +1087,40 @@ async function main() {
   // then only needs to flush whatever wasn't already streamed. Ollama is
   // buffered so its output can be cleaned/rejected before any of it is shown.
   let streamedChars = 0;
+  const flush = (s) => {
+    streamedChars += s.length;
+    process.stdout.write(s);
+  };
+  // Streamed text is forwarded line by line; a line that starts like `FLAGS:` (or could still
+  // become one) is held back so the flags never reach stdout/the HUD.
+  let held = "", lineStart = true, flagsSeen = false;
+  const resetStream = () => { held = ""; lineStart = true; flagsSeen = false; };
+  const flagsOff = draftHasFlagsLine(text);
   const onChunk = args.stream
     ? (delta) => {
-        streamedChars += delta.length;
-        process.stdout.write(delta);
+        if (flagsOff) return flush(delta);
+        if (flagsSeen) return;
+        held += delta;
+        let nl;
+        while ((nl = held.indexOf("\n")) >= 0) {
+          const line = held.slice(0, nl + 1);
+          if (lineStart && FLAGS_LINE.test(line)) { flagsSeen = true; held = ""; return; }
+          flush(line);
+          held = held.slice(nl + 1);
+          lineStart = true;
+        }
+        const couldBeFlags = lineStart && (FLAGS_LINE.test(held) || FLAGS_PREFIX.test(held));
+        if (held && !couldBeFlags) {
+          flush(held);
+          held = "";
+          lineStart = false;
+        }
       }
     : null;
-  const emit = (out, via) => {
+  const emit = (raw, via) => {
+    const { rewrite: out, flags } = splitFlags(raw, text);
     if (via) console.error(`via:${via}`);
+    for (const f of flags) console.error(`flag:${f}`);
     if (args.logHistory) {
       appendHistory({
         ts: new Date().toISOString(),
@@ -1075,10 +1129,11 @@ async function main() {
         style: args.style || "",
         instruction: args.instruction || "",
         ...(task.reply && { mode: "reply", images: task.images.length }),
+        ...(flags.length && { flags }),
         via,
       });
     }
-    const rest = streamedChars > 0 ? "" : out;
+    const rest = out.length > streamedChars ? out.slice(streamedChars) : "";
     process.stdout.write(rest, () => process.exit(0));
   };
   const remaining = (min) => Math.max(deadline - Date.now(), min);
@@ -1117,6 +1172,7 @@ async function main() {
     if (backend === "kimi" && !KIMI_API_KEY && !explicit) continue;
     if (backend === "ollama" && errors.length)
       console.error(`revoice: ${errors.join("; ")} — falling back to local Ollama (${OLLAMA_MODEL})`);
+    resetStream();
     try {
       emit(await runners[backend](), backend);
       return;
