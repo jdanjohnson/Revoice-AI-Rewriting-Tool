@@ -72,17 +72,25 @@ In `auto` mode (the hotkeys) the CLI tries Claude → Codex → OpenAI → Kimi 
 - **Kimi / any OpenAI-compatible API**: put `KIMI_API_KEY=sk-...` (from platform.moonshot.ai) in `~/.revoice/env` — that file is loaded by the CLI even when launched from the hotkey. Options: `KIMI_MODEL` (default `moonshot-v1-auto`), `KIMI_API_URL` (point it at any OpenAI-compatible endpoint), `KIMI_TEMPERATURE` (unset by default — Moonshot's `kimi-k*` models reject non-default temperatures).
 - **Ollama (local/free)**: `brew install ollama && ollama pull llama3.2:3b` (~2 GB, fast on Apple Silicon). Options: `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` (default 8192), `OLLAMA_PROMPT` (`compact` default / `full`). Small local models can't follow the full voice guide + skills + samples — they answer the draft instead of rewriting it — so Ollama gets a short rewrite-only prompt (plus the active style and any instruction) unless you set `OLLAMA_PROMPT=full` for a bigger model (e.g. `OLLAMA_MODEL=llama3.1:8b`). Output that only echoes the draft is treated as a failure, never pasted. When an automatic chain ends up on Ollama because the others failed, the CLI says so on stderr (`revoice: codex: … — falling back to local Ollama`).
 
-## Reply mode (⌃⇧R)
+## Context-aware replies, prompts, and questions
 
-The rewrite hotkeys only ever see the text you selected. Reply mode adds the conversation itself:
+⌃⇧R is a one-press reply workflow: Hammerspoon snapshots the frontmost window (downscaled to ≤1800px wide), collects any selected text as rough notes, and passes the app name and window title to the CLI. There is no notes dialog. Empty notes are valid; if text, screenshot, and gathered context are all empty, the CLI reports `revoice: nothing to reply to`. The draft appears in the normal preview; it is never sent automatically.
 
-1. Hammerspoon snapshots the frontmost window (`hs.window:snapshot()`, downscaled to ≤1800px wide) to `~/.revoice/tmp/reply-<ms>.png`. This needs the **Screen Recording** permission for Hammerspoon; if the snapshot fails and nothing is selected, the hotkey aborts with a hint.
-2. Any selected text is copied as extra `--context` (select the message you're answering for text-only backends).
-3. A prompt box asks what you want to say; rough notes are fine, empty means "infer from the conversation".
-4. The CLI runs `revoice --reply --image <png> [--context <sel>]` with the notes on stdin, using the same style/backend/skills/voice samples as a rewrite.
-5. The result lands in the normal preview (⏎ paste, R regenerate, 1–4 restyle, esc discard). Regenerate/restyle reuse the same screenshot; screenshots older than two minutes are deleted from `~/.revoice/tmp` when a run finishes.
+⌃⇧P turns selected rough notes into a structured prompt. ⌃⇧A answers a selected question, or opens a text prompt if no selection exists. Reply, prompt, and ask modes are mutually exclusive, can use local and configured context, and send that context in the user/task message rather than the system prompt. Plain rewrite mode uses only local about-me and notes files, never Zo.
 
-Prompt-wise, the system prompt is unchanged for Claude/Codex/OpenAI/Kimi (voice guide → skills → rejected examples → samples → instruction); compact-mode Ollama gets a short reply-drafting prompt instead of its rewrite-only one. The task message is a *reply brief* instead of the draft block: it states that reply mode overrides the "never reply" rewrite rule, carries the conversation context and your notes, forbids inventing facts/dates/commitments, and asks for only the send-ready reply.
+Local context lives only in `~/.revoice/context/`:
+
+- `about-me.md`: stable author background, capped at 3,000 characters.
+- `notes.md`: dated preferences and reminders, using the last 2,000 characters. `revoice --remember "text"` appends a dated line.
+- `zoey.md`: cached Zoey context card, capped at 4,000 characters. It is refreshed when missing or older than 24 hours; refresh failures retain the existing cache.
+
+The optional Zo MCP client is used only for contextual reads. It performs `initialize`, `notifications/initialized`, and `tools/call`, reuses the returned `mcp-session-id`, and accepts JSON or SSE replies. `zoCall` enforces its allowlist before making any network request: `read_file`, `list_directory`, and `use_app_google_calendar` only for `google_calendar-query-free-busy-calendars` or `google_calendar-list-events`. Contact cards are read from `/home/workspace/Records/Contacts/<slug>.md`; the Zoey card is `/home/workspace/Records/Context/you.md`. Missing cards are skipped. Zo errors and slow context sources are non-fatal, reported on stderr, and share a six-second context budget.
+
+Calendar availability is queried only when `REVOICE_CALENDARS` is configured and the message/context/window title contains a meeting-related term. Revoice calls the read-only free/busy tool for the next seven days, merges busy intervals, and computes weekday free slots in `REVOICE_TZ` within `REVOICE_WORK_HOURS`. Availability lines are never trimmed from prompt context; the reply brief instructs the model to offer only concrete times present in that block. No event creation tool is permitted.
+
+If `GOLDFISH_MCP` points to an existing executable (or the default Goldfish app binary exists), Revoice makes a best-effort stdio JSON-RPC request: initialize, list tools, and call the first matching read-only search/recall/activity/context tool with one string argument. The process is killed after the call or a three-second timeout; output is capped at 3,000 characters.
+
+Assembled context is capped at 12,000 characters by trimming Goldfish, contacts, Zoey, and about-me in that order; notes and availability are retained. `REVOICE_CONTEXT=off` disables local and remote context gathering. `revoice --sync-context` explicitly refreshes the Zoey cache; `revoice --context-status` reports local file sizes/ages and Zo, calendar, and Goldfish configuration. `--doctor` appends the same context status lines.
 
 How each backend receives the screenshot:
 
@@ -94,7 +102,7 @@ How each backend receives the screenshot:
 | Kimi / OpenAI-compatible | same `image_url` content part (needs a vision-capable `KIMI_MODEL`) |
 | Ollama | `images: [<base64>]` on the user message (needs a vision-capable `OLLAMA_MODEL`; the default `llama3.2:3b` is text-only) |
 
-A text-only model on OpenAI/Kimi/Ollama will either ignore the image or return a provider error, which the chain then treats like any other failure. Nothing is captured or uploaded unless you press ⌃⇧R.
+A text-only model on OpenAI/Kimi/Ollama will either ignore the image or return a provider error, which the chain then treats like any other failure. Nothing is captured or uploaded unless you press ⌃⇧R or click the floating button. Revoice drafts and previews only: **it never sends email and never creates or books calendar events.**
 
 ## CLI usage (standalone)
 
@@ -114,23 +122,28 @@ echo "some text" | revoice --stream               # stream output chunks as they
 echo "some text" | revoice --log-history          # record the rewrite in ~/.revoice/history.jsonl
 revoice --history                                 # print recent rewrites (newest first)
 revoice --mark-last accepted|rejected             # record the outcome of the last rewrite
-echo "yes, but not before fri" | revoice --reply --image thread.png   # draft a reply from a screenshot + notes
-echo "" | revoice --reply --context "$(pbpaste)"                     # reply to copied text, let the model infer
+echo "yes, but not before fri" | revoice --reply --image thread.png   # notes are optional
+echo "" | revoice --reply --context "$(pbpaste)"                     # reply to copied text
+echo "Plan a release note" | revoice --prompt
+echo "What is our target date?" | revoice --ask
+revoice --remember "Prefer short, direct replies"
+revoice --sync-context
+revoice --context-status
 ```
 
-`--reply` accepts empty stdin as long as `--context` or at least one `--image` is given; `--image` may be repeated. `--context`/`--image` are rejected outside reply mode.
+`--reply` accepts empty stdin; if no input, image, conversation context, or gathered context exists, it reports `revoice: nothing to reply to`. `--image` may be repeated. `--context`/`--image` are rejected outside reply mode.
 
 ## Environment variables
 
 May also live in `~/.revoice/env` (quote values that contain ` #`). Real environment variables win over the file; within the file the last assignment of a key wins, so appending with `>>` overrides. Hammerspoon passes your login-shell `PATH` (plus `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`) to the CLI so npm/nvm-installed `codex`/`claude` are found from the hotkeys.
 
-`REWRITE_PROMPT_FILE`, `REWRITE_BACKEND`, `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_MS`, `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_TIMEOUT_MS`, `OPENAI_API_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT`, `KIMI_API_URL`, `KIMI_API_KEY`, `KIMI_MODEL`, `KIMI_TEMPERATURE`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `REWRITE_TIMEOUT_MS` (default 25000), `VOICE_SAMPLES_FILE`, `VOICE_MAX_CHARS`, `REWRITE_STYLES_DIR`, `REWRITE_SKILLS_DIR`, `SKILLS_MAX_CHARS`, `REWRITE_HISTORY_FILE`, `REJECTED_EXAMPLES_MAX`.
+`REWRITE_PROMPT_FILE`, `REWRITE_BACKEND`, `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_MS`, `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_TIMEOUT_MS`, `OPENAI_API_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT`, `KIMI_API_URL`, `KIMI_API_KEY`, `KIMI_MODEL`, `KIMI_TEMPERATURE`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `REWRITE_TIMEOUT_MS` (default 25000), `VOICE_SAMPLES_FILE`, `VOICE_MAX_CHARS`, `REWRITE_STYLES_DIR`, `REWRITE_SKILLS_DIR`, `SKILLS_MAX_CHARS`, `REWRITE_HISTORY_FILE`, `REJECTED_EXAMPLES_MAX`, `REVOICE_ZO_TOKEN` (fallback `ZO_API_TOKEN`), `REVOICE_ZO_URL`, `REVOICE_CALENDARS`, `REVOICE_TZ`, `REVOICE_WORK_HOURS`, `REVOICE_CONTEXT`, `GOLDFISH_MCP`, and `REVOICE_NOW` (test-only current-time override).
 
 ## Security & privacy
 
-- The hotkey sends whatever text is selected — and, for ⌃⇧R, a screenshot of the frontmost window — to a remote API (Claude, OpenAI/Codex, or Kimi) unless you use `--backend ollama`. Screenshots are only taken when you press ⌃⇧R and are deleted from `~/.revoice/tmp` after the run. Don't trigger it on passwords, keys, or other secrets — there is no per-invocation confirmation by design (it's a one-keystroke tool).
+- The hotkey sends the selected text and task context to the configured rewrite backend (Claude, OpenAI/Codex, Kimi, or local Ollama). Reply screenshots are only taken when you invoke reply mode and are cleaned up after the preview. Don't trigger it on passwords, keys, or other secrets — there is no per-invocation confirmation by design (it's a one-keystroke tool).
 - Endpoint/key env vars are only read from your own environment or `~/.revoice/env`; only set them to endpoints you trust. Use `--backend ollama` to keep text fully local.
-- Rewrite history, voice samples, and your prompt live only in `~/.revoice/` on your machine.
+- Rewrite history, voice samples, prompt, and local context files live in `~/.revoice/` on your machine. Context files are not copied by the installer.
 
 ## Troubleshooting
 
@@ -152,4 +165,3 @@ May also live in `~/.revoice/env` (quote values that contain ` #`). Real environ
 - `./install.sh` from a checkout copies `bin/revoice.js` + `package.json` into `~/.revoice`, links `revoice` onto PATH, wires `~/.hammerspoon/revoice.lua`, and records the checkout path in `~/.revoice/src-path`.
 - Piped (`curl -fsSL https://raw.githubusercontent.com/jdanjohnson/Revoice-AI-Rewriting-Tool/main/install.sh | bash`): there is no checkout next to the script, so it shallow-clones `REVOICE_REPO` (default: this repo) into `~/.revoice/src` — or `git pull --ff-only` if that already exists — and re-executes `~/.revoice/src/install.sh`.
 - `revoice --update`: reads `~/.revoice/src-path`, runs `git pull --ff-only` there, then re-runs that checkout's `install.sh` (exit code propagated). Fails with a hint if the path is missing, has no `install.sh`, or is not a git checkout.
-

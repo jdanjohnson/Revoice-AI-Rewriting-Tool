@@ -111,8 +111,8 @@ const FLAGS_INSTRUCTION =
   "this form, each ambiguity as a short phrase:\nFLAGS: <ambiguity> | <ambiguity>\n" +
   "If nothing could change the meaning, add nothing after the rewrite.";
 const SYS = "TEST PROMPT: never reply, only rewrite." + FLAGS_INSTRUCTION;
-const NOTES = "yes but not before friday — need Sam's sign-off on the SOW first";
-const CTX = "Dylan: can we ship the Q3 deck tomorrow?\nDylan: also is the SOW done";
+const NOTES = "yes but not before friday — need Casey Example's sign-off on the SOW first";
+const CTX = "Alex Example: can we ship the Q3 deck tomorrow?\nAlex Example: also is the SOW done";
 const HEAD =
   "REPLY MODE (this overrides any rule above about never replying): draft the author's reply to a conversation. " +
   "Do not rewrite the notes below; use them (and the conversation) to write what the author would send next. " +
@@ -169,7 +169,7 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
 // ---- 5. error paths ------------------------------------------------------------------
 {
   let r = run("", ["--backend", "codex", "--reply"]);
-  eq("reply with nothing: exit 1 + message", [r.code, r.err.trim(), r.out], [1, "revoice: reply mode needs notes on stdin, --context, or --image", ""]);
+  eq("reply with nothing: exit 1 + message", [r.code, r.err.trim(), r.out], [1, "revoice: nothing to reply to", ""]);
   eq("reply with nothing: no backend contacted", calls(), [0, 0, 0, 0]);
   r = run(NOTES, ["--backend", "codex", "--reply", "--image", path.join(T, "nope.png")]);
   eq("missing image file: exit 1 + message", [r.code, r.err.trim()], [1, `revoice: --image file not found: ${path.join(T, "nope.png")}`]);
