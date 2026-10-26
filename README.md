@@ -48,15 +48,40 @@ That's it. Your clipboard is untouched, your cursor stays where it was, and the 
 | **⌃⇧3** | Professional — polished business |
 | **⌃⇧4** | Concise — about half the words |
 | **⌃⇧E** | Tell it what to do ("make it shorter", "make it warmer", anything) |
-| **⌃⇧R** | **Reply mode** — it looks at the thread on your screen, asks what you want to say, and drafts the reply in your voice |
+| **⌃⇧R** | **One-press reply** — uses the screen and selected text as context, then previews a draft |
+| **⌃⇧P** | Turn selected rough notes into a clear prompt for an AI tool |
+| **⌃⇧A** | Answer a selected question, or enter a question if nothing is selected |
 
 Don't like the rewrite? Press **R** to regenerate or **1–4** to instantly re-run it in another style, right from the preview.
 
-## Reply to anything in one keystroke
+## Context-aware replies
 
-Staring at a Slack thread or an email you need to answer? Click into the reply box and hit **⌃⇧R**. revoice screenshots the window, asks *"What do you want to say?"* (a few rough words — or nothing, and it'll infer), and drafts the reply in your voice from what it sees on screen. Same preview: ⏎ pastes it, esc throws it away.
+Click into a reply box and press **⌃⇧R**. Revoice captures the active window, uses any selected text as rough notes, gathers the context you have configured, and shows a draft in the normal preview. There is no notes dialog. The preview never sends the reply: press **⏎** to paste it yourself, or **esc** to keep the original.
 
-Best with the Codex/GPT-6 Astra backend, which reads the screenshot natively. The screenshot sits in `~/.revoice/tmp` only while the draft is in flight and is cleaned up afterwards, and nothing is captured unless you press the hotkey. macOS will ask you to allow **Screen Recording** for Hammerspoon the first time.
+Revoice can use local files in `~/.revoice/context/`:
+
+- `about-me.md` — stable background about you, up to 3,000 characters.
+- `notes.md` — durable preferences and reminders; the last 2,000 characters are used. Use **✍️ → Remember…** or `revoice --remember "text"` to append a dated note.
+- `zoey.md` — a local cache of your Zoey context card, refreshed when stale.
+
+When a Zo token is configured, reply, ask, and prompt modes can also look up up to three matching contact cards and read calendar free/busy information when a meeting is being discussed. Calendar access is read-only. Optional Goldfish screen activity is also read-only and best-effort. The context is sent to the configured rewrite backend as part of the user message; leave those features unconfigured or set `REVOICE_CONTEXT=off` to disable context gathering.
+
+By default, Revoice masks detected email addresses, phone numbers, full names, first names, and whole-word terms listed in `~/.revoice/context/private-terms.txt` before sending text and gathered context to a backend; placeholders are restored locally in the preview and history. Set `REVOICE_MASK=off` to opt out. Screenshot images and the system voice prompt (including voice samples) are not masked and may still contain identifying information.
+
+Example setup for `~/.revoice/env` (replace placeholders with your own values):
+
+```sh
+REVOICE_ZO_TOKEN=YOUR_ZO_TOKEN
+REVOICE_CALENDARS=person@example.com
+REVOICE_TZ=America/New_York
+REVOICE_WORK_HOURS=9-18
+```
+
+Revoice's Zo allowlist permits only file reads, directory listing, and the approved Google Calendar read tools. **It never sends email and never creates or books calendar events.** Revoice only drafts and previews text; nothing is sent or booked automatically.
+
+**⌃⇧P** turns selected rough notes into a structured prompt. **⌃⇧A** answers a selected question, or opens a question prompt if nothing is selected. Both can use the configured context and use the same preview; nothing is sent until you choose what to do with the text yourself.
+
+For screenshot support, allow **Screen Recording** for Hammerspoon in macOS System Settings. Screenshots are only taken when you press the reply hotkey or floating button.
 
 ## It actually sounds like *you*
 

@@ -44,6 +44,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const CONFIG_DIR = path.join(os.homedir(), ".revoice");
 
@@ -76,6 +77,21 @@ const OLLAMA_NUM_CTX =
 const parsedTimeout = Number(process.env.REWRITE_TIMEOUT_MS);
 const REWRITE_TIMEOUT_MS =
   Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 25000;
+const ZO_TOKEN = process.env.REVOICE_ZO_TOKEN || process.env.ZO_API_TOKEN || "";
+const ZO_URL = process.env.REVOICE_ZO_URL || "https://api.zo.computer/mcp";
+const CONTEXT_DIR = path.join(CONFIG_DIR, "context");
+const CONTEXT_DISABLED = process.env.REVOICE_CONTEXT === "off";
+const CALENDAR_ACCOUNTS = (process.env.REVOICE_CALENDARS || "")
+  .split(",")
+  .map((account) => account.trim())
+  .filter(Boolean);
+const CONTEXT_TZ = process.env.REVOICE_TZ || "America/New_York";
+const CONTEXT_WORK_HOURS = process.env.REVOICE_WORK_HOURS || "9-18";
+const GOLDFISH_PATH =
+  process.env.GOLDFISH_MCP ||
+  (fs.existsSync("/Applications/Goldfish.app/Contents/MacOS/goldfish-mcp")
+    ? "/Applications/Goldfish.app/Contents/MacOS/goldfish-mcp"
+    : "");
 
 // Shared re-voicing rules appended to every style persona.
 const PROMPT_RULES =
@@ -476,13 +492,744 @@ function loadRejectedExamples() {
     .slice(-REJECTED_EXAMPLES_MAX);
 }
 
+const ZO_ALLOWED_TOOLS = new Set(["read_file", "list_directory", "use_app_google_calendar"]);
+const ZO_CALENDAR_TOOLS = new Set([
+  "google_calendar-query-free-busy-calendars",
+  "google_calendar-list-events",
+]);
+let zoSessionPromise = null;
+let zoRequestId = 0;
+
+function zoResponsePayload(text, contentType) {
+  if (contentType?.includes("text/event-stream")) {
+    const data = text
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .filter(Boolean);
+    text = data[data.length - 1] || "";
+  }
+  if (!text) return {};
+  return JSON.parse(text);
+}
+
+async function zoHttp(payload, sessionId, timeoutMs = 3000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(ZO_URL, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${ZO_TOKEN}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Zo HTTP ${response.status}: ${text.slice(0, 160)}`);
+    return {
+      payload: zoResponsePayload(text, response.headers.get("content-type")),
+      sessionId: response.headers.get("mcp-session-id") || sessionId,
+    };
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error(`Zo request timed out after ${timeoutMs}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function zoSession() {
+  if (!ZO_TOKEN) throw new Error("REVOICE_ZO_TOKEN is not set");
+  if (!zoSessionPromise) {
+    zoSessionPromise = (async () => {
+      const initialized = await zoHttp({
+        jsonrpc: "2.0",
+        id: ++zoRequestId,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "revoice", version: "1.0.0" },
+        },
+      });
+      if (initialized.payload.error)
+        throw new Error(initialized.payload.error.message || "Zo initialize failed");
+      const sessionId = initialized.sessionId;
+      await zoHttp(
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        sessionId
+      );
+      return sessionId;
+    })().catch((error) => {
+      zoSessionPromise = null;
+      throw error;
+    });
+  }
+  return zoSessionPromise;
+}
+
+async function zoCall(tool, args = {}) {
+  if (
+    !ZO_ALLOWED_TOOLS.has(tool) ||
+    (tool === "use_app_google_calendar" && !ZO_CALENDAR_TOOLS.has(args.tool_name))
+  )
+    throw new Error(`zo tool not allowed: ${tool}`);
+  const sessionId = await zoSession();
+  const response = await zoHttp(
+    {
+      jsonrpc: "2.0",
+      id: ++zoRequestId,
+      method: "tools/call",
+      params: { name: tool, arguments: args },
+    },
+    sessionId
+  );
+  if (response.payload.error)
+    throw new Error(response.payload.error.message || `Zo ${tool} failed`);
+  const result = response.payload.result || {};
+  if (result.isError)
+    throw new Error(
+      (result.content || []).map((part) => part.text || "").join("\n") || `Zo ${tool} failed`
+    );
+  let content = (result.content || []).map((part) => part.text || "").join("");
+  if (tool === "read_file") {
+    try {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string"))
+        content = parsed.join("");
+    } catch {}
+  }
+  return content;
+}
+
+function readContextFile(name, cap, tail = false) {
+  try {
+    const body = fs.readFileSync(path.join(CONTEXT_DIR, name), "utf8");
+    return tail ? body.slice(-cap) : body.slice(0, cap);
+  } catch {
+    return "";
+  }
+}
+
+function localContextBlocks(mode) {
+  if (CONTEXT_DISABLED) return [];
+  const names = mode === "rewrite" ? ["about-me.md", "notes.md"] : ["about-me.md", "notes.md", "zoey.md"];
+  return names
+    .map((name) => ({
+      source: name.replace(/\.md$/, ""),
+      title: name.replace(/\.md$/, ""),
+      body: readContextFile(name, name === "about-me.md" ? 3000 : name === "notes.md" ? 2000 : 4000, name === "notes.md"),
+    }))
+    .filter((block) => block.body.trim());
+}
+
+async function syncZoeyContext() {
+  const body = await zoCall("read_file", { target_file: "/home/workspace/Records/Context/you.md" });
+  if (!body.trim()) throw new Error("Zo returned an empty context card");
+  fs.mkdirSync(CONTEXT_DIR, { recursive: true });
+  fs.writeFileSync(path.join(CONTEXT_DIR, "zoey.md"), body, { mode: 0o600 });
+  return body;
+}
+
+function sourceWarning(source, error) {
+  const reason = String(error?.message || error || "unavailable").replace(/\s+/g, " ").slice(0, 180);
+  console.error(`revoice: context ${source} skipped: ${reason}`);
+}
+
+function extractPeople(text) {
+  const candidates = [];
+  const seen = new Set();
+  const add = (parts) => {
+    if (parts.length < 2) return;
+    const first = parts[0].replace(/[^a-z]/gi, "");
+    const last = parts[1].replace(/[^a-z]/gi, "");
+    if (!first || !last) return;
+    const name = `${first} ${last}`;
+    const slug = `${first}-${last}`.toLowerCase();
+    if (seen.has(slug)) return;
+    seen.add(slug);
+    candidates.push({ name, slug });
+  };
+  for (const match of text.matchAll(PERSON_NAME_PATTERN))
+    add([match[1], match[2]]);
+  for (const match of text.matchAll(/\b([A-Z0-9._+-]+)@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi)) {
+    const parts = match[1].split(/[._-]+/).filter(Boolean);
+    if (parts.length >= 2) add(parts);
+  }
+  return candidates.slice(0, 4);
+}
+
+const PERSON_NAME_PATTERN = /\b([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?)\s+([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?)\b/g;
+const CALENDAR_DATE_LABEL = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$/;
+const MASK_PRIORITY = { EMAIL: 0, PHONE: 1, TERM: 2, PERSON: 3, NAME: 4 };
+
+function readPrivateTerms() {
+  try {
+    const seen = new Set();
+    return fs.readFileSync(path.join(CONTEXT_DIR, "private-terms.txt"), "utf8")
+      .split(/\r?\n/)
+      .map((term) => term.trim())
+      .filter((term) => {
+        if (!term || seen.has(term.toLowerCase())) return false;
+        seen.add(term.toLowerCase());
+        return true;
+      });
+  } catch {
+    return [];
+  }
+}
+
+function createMasker(texts, { privateTerms = [] } = {}) {
+  const sources = (Array.isArray(texts) ? texts : [texts])
+    .filter((text) => text !== null && text !== undefined)
+    .map(String);
+  const tokensByValue = new Map();
+  const valuesByToken = new Map();
+  const counters = new Map();
+  const usedTokens = new Set();
+  const entries = [];
+  const entryKeys = new Set();
+
+  const register = (value, type) => {
+    const priority = MASK_PRIORITY[type];
+    const existing = tokensByValue.get(value);
+    if (existing && existing.priority <= priority) return existing.token;
+    const index = (counters.get(type) || 0) + 1;
+    counters.set(type, index);
+    const token = `[[${type}_${index}]]`;
+    tokensByValue.set(value, { token, priority });
+    valuesByToken.set(token, value);
+    return token;
+  };
+  const addEntry = (value, type, privateTerm = false) => {
+    register(value, type);
+    const key = `${type}\0${privateTerm ? value.toLowerCase() : value}`;
+    if (!entryKeys.has(key)) {
+      entryKeys.add(key);
+      entries.push({ value, type, privateTerm });
+    }
+  };
+
+  for (const source of sources) {
+    for (const match of source.matchAll(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g))
+      addEntry(match[0], "EMAIL");
+    for (const match of source.matchAll(/\+?\d[\d\s().-]{7,}\d/g))
+      if ((match[0].match(/\d/g) || []).length >= 10) addEntry(match[0], "PHONE");
+  }
+
+  const seenTerms = new Set();
+  const terms = Array.isArray(privateTerms)
+    ? privateTerms
+    : privateTerms ? String(privateTerms).split(/\r?\n/) : [];
+  for (const term of terms) {
+    const value = String(term).trim();
+    const key = value.toLowerCase();
+    if (!value || seenTerms.has(key)) continue;
+    seenTerms.add(key);
+    addEntry(value, "TERM", true);
+  }
+
+  for (const source of sources) {
+    for (const match of source.matchAll(PERSON_NAME_PATTERN)) {
+      if (CALENDAR_DATE_LABEL.test(match[0])) continue;
+      addEntry(match[0], "PERSON");
+      addEntry(match[1], "NAME");
+    }
+  }
+
+  entries.sort((a, b) =>
+    b.value.length - a.value.length ||
+    MASK_PRIORITY[a.type] - MASK_PRIORITY[b.type]
+  );
+  const wordPattern = (value, flags = "g") =>
+    new RegExp(`(?<![A-Za-z0-9_])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`, flags);
+
+  function mask(input) {
+    let result = String(input ?? "");
+    for (const entry of entries) {
+      const pattern = wordPattern(entry.value, entry.privateTerm ? "gi" : "g");
+      result = result.replace(pattern, (match) => {
+        const token = register(match, entry.type);
+        usedTokens.add(token);
+        return token;
+      });
+    }
+    return result;
+  }
+
+  function unmask(input) {
+    return String(input ?? "").replace(/\[\[?(EMAIL|PHONE|PERSON|NAME|TERM)_(\d+)\]\]?/g, (match, type, index) =>
+      valuesByToken.get(`[[${type}_${index}]]`) ?? match
+    );
+  }
+
+  return { mask, unmask, get count() { return usedTokens.size; } };
+}
+
+function dateParts(epoch, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(epoch));
+  return Object.fromEntries(parts.map((part) => [part.type, part.value]));
+}
+
+function zonedEpoch(year, month, day, hour, minute, timeZone) {
+  const wanted = Date.UTC(year, month - 1, day, hour, minute);
+  let epoch = wanted;
+  for (let i = 0; i < 3; i++) {
+    const parts = dateParts(epoch, timeZone);
+    const represented = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
+    const delta = wanted - represented;
+    if (!delta) break;
+    epoch += delta;
+  }
+  return epoch;
+}
+
+function mergeIntervals(intervals) {
+  const sorted = intervals
+    .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+    .sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const interval of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && interval[0] <= last[1]) last[1] = Math.max(last[1], interval[1]);
+    else merged.push([...interval]);
+  }
+  return merged;
+}
+
+function parseBusyIntervals(raw) {
+  const intervals = [];
+  const expression = /['"]start['"]\s*:\s*['"]([^'"]+)['"]\s*,\s*['"]end['"]\s*:\s*['"]([^'"]+)['"]/g;
+  for (const match of raw.matchAll(expression)) {
+    const start = Date.parse(match[1]);
+    const end = Date.parse(match[2]);
+    if (Number.isFinite(start) && Number.isFinite(end)) intervals.push([start, end]);
+  }
+  return intervals;
+}
+
+function formatAvailabilityTime(epoch, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hourCycle: "h12",
+    timeZoneName: "short",
+  }).formatToParts(new Date(epoch));
+  const p = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    date: `${p.weekday} ${p.month} ${p.day}`,
+    hour: `${p.hour}:${p.minute}`,
+    dayPeriod: p.dayPeriod,
+    zone: p.timeZoneName,
+  };
+}
+
+function computeFreeSlots({
+  now,
+  until = now + 7 * 86400000,
+  busy = [],
+  workHours = CONTEXT_WORK_HOURS,
+  timeZone = CONTEXT_TZ,
+}) {
+  const hours = workHours.match(/^(\d{1,2})-(\d{1,2})$/);
+  if (!hours) throw new Error("REVOICE_WORK_HOURS must use H-H format");
+  const startHour = Math.max(0, Math.min(23, Number(hours[1])));
+  const endHour = Math.max(1, Math.min(24, Number(hours[2])));
+  if (endHour <= startHour) throw new Error("REVOICE_WORK_HOURS end must be after start");
+  const mergedBusy = mergeIntervals(busy);
+  const today = dateParts(now, timeZone);
+  const calendarDate = new Date(Date.UTC(+today.year, +today.month - 1, +today.day));
+  const minuteNow = +today.hour * 60 + +today.minute + new Date(now).getSeconds() / 60;
+  const nextBoundary = Math.floor(minuteNow / 30) * 30 + 30;
+  const slots = [];
+  for (let offset = 0; offset <= 7 && slots.length < 8; offset++) {
+    const day = new Date(calendarDate.getTime() + offset * 86400000);
+    const year = day.getUTCFullYear(), month = day.getUTCMonth() + 1, date = day.getUTCDate();
+    const morning = zonedEpoch(year, month, date, startHour, 0, timeZone);
+    const evening = zonedEpoch(year, month, date, endHour === 24 ? 0 : endHour, 0, timeZone) + (endHour === 24 ? 86400000 : 0);
+    if (morning >= until) break;
+    const dayEnd = Math.min(evening, until);
+    const dayName = dateParts(morning, timeZone).weekday;
+    if (dayName === "Sat" || dayName === "Sun") continue;
+    let cursor = morning;
+    if (offset === 0) {
+      const rounded = nextBoundary >= 1440
+        ? zonedEpoch(year, month, date + 1, 0, 0, timeZone)
+        : zonedEpoch(year, month, date, Math.floor(nextBoundary / 60), nextBoundary % 60, timeZone);
+      cursor = Math.max(cursor, rounded);
+    }
+    if (cursor >= dayEnd) continue;
+    for (const [busyStart, busyEnd] of mergedBusy) {
+      if (busyEnd <= cursor || busyStart >= dayEnd) continue;
+      if (busyStart - cursor >= 30 * 60000) slots.push([cursor, Math.min(busyStart, dayEnd)]);
+      cursor = Math.max(cursor, busyEnd);
+      if (cursor >= dayEnd) break;
+    }
+    if (dayEnd - cursor >= 30 * 60000) slots.push([cursor, dayEnd]);
+    if (slots.length >= 8) break;
+  }
+  return slots.slice(0, 8).map(([start, end]) => {
+    const from = formatAvailabilityTime(start, timeZone);
+    const to = formatAvailabilityTime(end, timeZone);
+    const span = from.dayPeriod === to.dayPeriod
+      ? `${from.hour}–${to.hour} ${to.dayPeriod}`
+      : `${from.hour} ${from.dayPeriod}–${to.hour} ${to.dayPeriod}`;
+    return `${from.date}, ${span} ${from.zone}`;
+  });
+}
+
+function availabilityIsRelevant(text) {
+  return /\b(meet|meeting|call|chat|schedule|availability|available|free|time works|calendar|book|sync|catch up|coffee|next week|tomorrow)\b/i.test(text);
+}
+
+async function gatherAvailability(text, windowStart) {
+  const windowEnd = new Date(windowStart.getTime() + 7 * 86400000);
+  const results = await Promise.all(
+    CALENDAR_ACCOUNTS.map(async (account) => {
+      try {
+        const raw = await zoCall("use_app_google_calendar", {
+          tool_name: "google_calendar-query-free-busy-calendars",
+          email: account,
+          configured_props: {
+            calendarId: ["primary"],
+            timeMin: windowStart.toISOString(),
+            timeMax: windowEnd.toISOString(),
+            timeZone: CONTEXT_TZ,
+          },
+        });
+        return { account, intervals: parseBusyIntervals(raw) };
+      } catch {
+        return { account, intervals: [], failed: true };
+      }
+    })
+  );
+  const failures = results.filter((result) => result.failed).map((result) => result.account);
+  if (failures.length)
+    return `Calendar availability unavailable (could not read: ${failures.join(", ")}); do not propose specific times.`;
+  const merged = mergeIntervals(results.flatMap((result) => result.intervals));
+  const slots = computeFreeSlots({ now: windowStart.getTime(), until: windowEnd.getTime(), busy: merged });
+  const lines = slots.length ? slots : ["No free 30-minute slots found in the next seven days."];
+  return lines.join("\n");
+}
+
+function parseGoldfishText(result) {
+  if (typeof result === "string") return result;
+  if (result?.content) return result.content.map((part) => part.text || "").join("\n");
+  return "";
+}
+
+async function searchGoldfish(query) {
+  if (!GOLDFISH_PATH || !fs.existsSync(GOLDFISH_PATH)) return "";
+  const child = spawn(GOLDFISH_PATH, [], { stdio: ["pipe", "pipe", "ignore"] });
+  const pending = new Map();
+  let buffer = "";
+  let timeoutId;
+  let childError;
+  const clearTimeoutId = () => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = undefined;
+  };
+  const rejectPending = (error) => {
+    childError ||= error;
+    for (const [id, entry] of pending) {
+      pending.delete(id);
+      entry.reject(childError);
+    }
+  };
+  const fail = (error) => {
+    clearTimeoutId();
+    rejectPending(error);
+  };
+  const request = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      if (childError) return reject(childError);
+      const id = ++zoRequestId;
+      pending.set(id, { resolve, reject });
+      try {
+        child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      } catch (error) {
+        fail(error);
+      }
+    });
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop();
+    for (const line of lines) {
+      try {
+        const response = JSON.parse(line);
+        const entry = pending.get(response.id);
+        if (!entry) continue;
+        pending.delete(response.id);
+        if (response.error) entry.reject(new Error(response.error.message || "Goldfish error"));
+        else entry.resolve(response.result);
+      } catch {}
+    }
+  });
+  child.stdin.on("error", fail);
+  child.on("error", fail);
+  const onExit = (code, signal) => {
+    const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+    fail(new Error(`Goldfish exited before responding (${reason})`));
+  };
+  child.on("close", onExit);
+  child.on("exit", onExit);
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = new Error("Goldfish timed out");
+      fail(error);
+      reject(error);
+    }, 3000);
+    timeoutId.unref();
+  });
+  try {
+    const response = await Promise.race([
+      (async () => {
+        await request("initialize", {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "revoice", version: "1.0.0" },
+        });
+        child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+        const listed = await request("tools/list");
+        const tools = listed?.tools || [];
+        const tool = tools.find((candidate) =>
+          /search|recall|recent|activity|context/i.test(candidate.name) &&
+          !/delete|forget|write|update|set|add|remove|clear|record/i.test(candidate.name)
+        );
+        if (!tool) return "";
+        const properties = tool.inputSchema?.properties || {};
+        const key = Object.keys(properties).find((name) => /^(query|q|text|search)$/i.test(name)) ||
+          (tool.inputSchema?.required || []).find((name) => properties[name]?.type === "string");
+        if (!key) return "";
+        const result = await request("tools/call", { name: tool.name, arguments: { [key]: query } });
+        return parseGoldfishText(result).slice(0, 3000);
+      })(),
+      timeout,
+    ]);
+    return response || "";
+  } catch (error) {
+    throw error;
+  } finally {
+    clearTimeoutId();
+    child.kill("SIGTERM");
+  }
+}
+
+function fitContextBlocks(blocks) {
+  const priorities = ["goldfish", "contacts", "zoey", "about-me"];
+  const size = () => blocks.reduce((sum, block) => sum + block.title.length + block.body.length + 8, 0);
+  for (const source of priorities) {
+    if (size() <= 12000) break;
+    const matching = blocks.filter((block) => block.source === source);
+    for (const block of matching) {
+      const excess = size() - 12000;
+      if (excess <= 0) break;
+      block.body = block.body.slice(0, Math.max(0, block.body.length - excess));
+    }
+  }
+  return blocks.filter((block) => block.body.trim());
+}
+
+async function gatherContext({ mode, text, context, windowTitle, app, hasImage = false }) {
+  const warnings = [];
+  const warn = (source, error) => {
+    const reason = String(error?.message || error || "unavailable").replace(/\s+/g, " ").slice(0, 180);
+    warnings.push(`context ${source} skipped: ${reason}`);
+    sourceWarning(source, error);
+  };
+  if (CONTEXT_DISABLED) return { blocks: [], warnings };
+  const local = localContextBlocks(mode === "rewrite" ? "rewrite" : mode);
+  if (mode === "rewrite") return { blocks: local, warnings };
+  const queryText = [text, context, windowTitle].filter(Boolean).join("\n");
+  const candidates = extractPeople(queryText);
+  const now = process.env.REVOICE_NOW ? new Date(process.env.REVOICE_NOW) : new Date();
+  const remoteJobs = [];
+  const remoteLabels = [];
+  if (ZO_TOKEN) {
+    const cached = path.join(CONTEXT_DIR, "zoey.md");
+    let stale = true;
+    try { stale = Date.now() - fs.statSync(cached).mtimeMs > 24 * 60 * 60 * 1000; } catch {}
+    if (stale) {
+      remoteLabels.push("zoey");
+      remoteJobs.push(
+        (async () => {
+          try {
+            const body = await syncZoeyContext();
+            return { source: "zoey-refresh", block: { source: "zoey", title: "Zoey context", body: body.slice(0, 4000) } };
+          } catch (error) {
+            warn("zoey", error);
+            return { source: "zoey-refresh", failed: true };
+          }
+        })()
+      );
+    }
+  }
+  let goldfishJob;
+  if (GOLDFISH_PATH) {
+    remoteLabels.push("goldfish");
+    goldfishJob = (async () => {
+      const body = await searchGoldfish((windowTitle || [context, text].filter(Boolean).join("\n") || "").slice(0, 200));
+      return {
+        source: "goldfish",
+        goldfishText: body,
+        ...(body && { block: { source: "goldfish", title: "RECENT SCREEN ACTIVITY (Goldfish)", body } }),
+      };
+    })();
+    remoteJobs.push(goldfishJob);
+  }
+  if (ZO_TOKEN) {
+    remoteLabels.push("contacts");
+    remoteJobs.push(
+      (async () => {
+        const goldfishResult = goldfishJob ? await goldfishJob.catch(() => null) : null;
+        const contactCandidates = [...candidates];
+        const seenCandidates = new Set(contactCandidates.map((candidate) => candidate.slug));
+        for (const candidate of extractPeople(goldfishResult?.goldfishText || "")) {
+          if (contactCandidates.length >= 4) break;
+          if (seenCandidates.has(candidate.slug)) continue;
+          seenCandidates.add(candidate.slug);
+          contactCandidates.push(candidate);
+        }
+        return Promise.all(contactCandidates.map(async (candidate) => {
+          try {
+            const body = await zoCall("read_file", {
+              target_file: `/home/workspace/Records/Contacts/${candidate.slug}.md`,
+            });
+            return body.trim()
+              ? { source: "contacts", block: { source: "contacts", title: `Contact: ${candidate.name}`, body: body.slice(0, 1500) } }
+              : { source: "contacts" };
+          } catch (error) {
+            if (!/not found|does not exist|no such file/i.test(error.message || "")) warn("contacts", error);
+            return { source: "contacts", failed: true };
+          }
+        }));
+      })()
+    );
+  }
+  if (ZO_TOKEN && CALENDAR_ACCOUNTS.length &&
+    (availabilityIsRelevant(queryText) || (mode === "reply" && hasImage))) {
+    remoteLabels.push("calendar");
+    remoteJobs.push(
+      (async () => {
+        try {
+          const body = await gatherAvailability(queryText, now);
+          return {
+            source: "availability",
+            block: {
+              source: "availability",
+              title: "MY REAL AVAILABILITY (from my calendars; only offer these times)",
+              body,
+              availabilityComplete: !body.startsWith("Calendar availability unavailable "),
+            },
+          };
+        } catch (error) {
+          warn("calendar", error);
+          return { source: "availability", failed: true };
+        }
+      })()
+    );
+  }
+  const collected = [];
+  const settledFlags = new Array(remoteJobs.length).fill(false);
+  const settled = remoteJobs.map((job, index) =>
+    job.then((result) => {
+      settledFlags[index] = true;
+      collected.push(result);
+      return result;
+    }).catch((error) => {
+      settledFlags[index] = true;
+      warn(remoteLabels[index], error);
+      return { source: remoteLabels[index], failed: true };
+    })
+  );
+  if (settled.length) {
+    let timeoutId;
+    await Promise.race([
+      Promise.all(settled),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => {
+          const unresolved = remoteLabels.filter((_, index) => !settledFlags[index]);
+          for (const source of unresolved) warn(source, "timed out after 6s context budget");
+          resolve();
+        }, 6000);
+        timeoutId.unref();
+      }),
+    ]);
+    clearTimeout(timeoutId);
+  }
+  const remote = collected.flatMap((result) => Array.isArray(result) ? result : [result]);
+  const refreshedZoey = remote.some((result) => result?.source === "zoey-refresh" && result.block);
+  const blocks = local.filter((block) => block.source !== "zoey" || !refreshedZoey);
+  let foundContacts = 0;
+  for (const result of remote) {
+    if (!result?.block) continue;
+    if (result.block.source === "contacts" && foundContacts >= 3) continue;
+    if (result.block.source === "contacts") foundContacts++;
+    blocks.push(result.block);
+  }
+  return { blocks: fitContextBlocks(blocks), warnings };
+}
+
+async function contextStatus() {
+  const lines = [];
+  for (const name of ["about-me.md", "notes.md", "zoey.md"]) {
+    const file = path.join(CONTEXT_DIR, name);
+    try {
+      const stat = fs.statSync(file);
+      const size = fs.readFileSync(file, "utf8").length;
+      const ageHours = Math.max(0, (Date.now() - stat.mtimeMs) / 3600000);
+      lines.push(`${name}: ${size} chars, ${ageHours < 1 ? `${Math.round(ageHours * 60)}m` : `${Math.floor(ageHours)}h`} old`);
+    } catch {
+      lines.push(`${name}: missing`);
+    }
+  }
+  let reachable = "not checked";
+  if (ZO_TOKEN) {
+    try {
+      await zoCall("read_file", { target_file: "/home/workspace/Records/Context/you.md" });
+      reachable = "reachable";
+    } catch {
+      reachable = "unreachable";
+    }
+  }
+  lines.push(`zoey: token ${ZO_TOKEN ? "set" : "not set"}; ${reachable}`);
+  lines.push(`calendars: ${CALENDAR_ACCOUNTS.length} accounts configured`);
+  lines.push(`goldfish: ${GOLDFISH_PATH && fs.existsSync(GOLDFISH_PATH) ? GOLDFISH_PATH : "not found"}`);
+  lines.push(process.env.REVOICE_MASK === "off"
+    ? "masking: off"
+    : `masking: on (${readPrivateTerms().length} private terms)`);
+  return lines;
+}
+
 // Reply mode: the user message is a self-contained brief instead of a draft.
-function buildReplyBrief(notes, context, hasImage) {
+function buildReplyBrief(notes, context, hasImage, task, contextBlocks) {
   let b =
     "REPLY MODE (this overrides any rule above about never replying): draft the " +
     "author's reply to a conversation. Do not rewrite the notes below; use them " +
     "(and the conversation) to write what the author would send next. Keep the " +
     "author's voice rules, and never invent facts, dates, or commitments the notes don't give.";
+  if (task.app || task.windowTitle)
+    b += `\nON SCREEN: ${[task.app, task.windowTitle].filter(Boolean).join(" — ")}`;
   if (hasImage)
     b +=
       "\nThe attached screenshot shows the conversation the author is replying to. " +
@@ -496,18 +1243,40 @@ function buildReplyBrief(notes, context, hasImage) {
     "\n\nOutput only the reply, ready to send, in the author's voice, matching the " +
     "channel's format (chat → short; email → a little more structure). No preamble, " +
     "no quotes, no explanation.";
+  if (contextBlocks.some((block) => block.source === "availability" && block.availabilityComplete))
+    b += "\nIf the conversation is about meeting, propose 2–3 concrete times from MY REAL AVAILABILITY; never offer a time not listed.";
   return b;
 }
 
 // What the model is asked to do with `text`. CLI backends (claude/codex) get
 // it appended to the system prompt; API backends (kimi/ollama) get it as the
 // user message, where a plain rewrite is just the draft itself.
+function personalContextMessage(blocks) {
+  if (!blocks?.length) return "";
+  return "PERSONAL CONTEXT (background about the author and the people involved — use only what's relevant, never quote it verbatim, never invent beyond it):\n" +
+    blocks.map((block) => `### ${block.title}\n${block.body}`).join("\n\n");
+}
 function buildTaskMessage(text, task) {
-  if (task.reply) return buildReplyBrief(text, task.context, task.images.length > 0);
-  return "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + text;
+  let message;
+  if (task.mode === "reply")
+    message = buildReplyBrief(text, task.context, task.images.length > 0, task, task.contextBlocks || []);
+  else if (task.mode === "prompt")
+    message = "PROMPT MODE (overrides rules above about only re-voicing): turn the author's rough request into a clear, effective prompt for an AI assistant. Keep every specific detail they gave; add structure (goal, context, constraints, desired output) only where it helps; use personal context only when clearly relevant; don't invent requirements. Output only the prompt.\n\nROUGH REQUEST:\n" + text;
+  else if (task.mode === "ask")
+    message = "ASK MODE: answer the author's question using the personal context and on-screen material. If the answer isn't there, say so in one line. Output only the answer, concise, ready to paste.\n\nQUESTION:\n" + text;
+  else message = "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + text;
+  if (task.mode !== "reply" && (task.app || task.windowTitle))
+    message += `\n\nON SCREEN: ${[task.app, task.windowTitle].filter(Boolean).join(" — ")}`;
+  const personal = personalContextMessage(task.contextBlocks || []);
+  if (personal) message += `\n\n${personal}`;
+  if (task.maskCount > 0)
+    message += "\n\nPlaceholders like [[PERSON_1]] stand for real values; copy them exactly where needed and never guess what they are.";
+  return message;
 }
 function buildUserMessage(text, task) {
-  return task.reply ? buildTaskMessage(text, task) : text;
+  return task.mode !== "rewrite" || task.contextBlocks?.length || task.app || task.windowTitle || task.maskCount > 0
+    ? buildTaskMessage(text, task)
+    : text;
 }
 
 // Small local models (llama3.2:3b) can't follow the full voice guide + skills +
@@ -539,10 +1308,21 @@ Rules:
 - Keep it concise and in the same language as the conversation.
 - Plain text only. No markdown, no emojis unless the conversation uses them.`;
 
+const OLLAMA_PROMPT_MODE = `You turn rough requests into clear prompts for AI assistants.
+Keep the author's details, add useful structure without inventing requirements, and output only the prompt.`;
+const OLLAMA_ASK_MODE = `You answer the author's question from the supplied context.
+If the answer is not present, say so in one line. Output only a concise answer.`;
+
 function buildOllamaSystemPrompt(instruction, task) {
-  if (OLLAMA_PROMPT === "full") return buildSystemPrompt(instruction);
-  let prompt = task.reply ? OLLAMA_COMPACT_REPLY_PROMPT : OLLAMA_COMPACT_PROMPT;
-  const persona = loadStylePersona(ACTIVE_STYLE).slice(0, 800);
+  if (OLLAMA_PROMPT === "full" && task.mode !== "prompt" && task.mode !== "ask")
+    return buildSystemPrompt(instruction, task);
+  let prompt = task.mode === "reply" ? OLLAMA_COMPACT_REPLY_PROMPT
+    : task.mode === "prompt" ? OLLAMA_PROMPT_MODE
+      : task.mode === "ask" ? OLLAMA_ASK_MODE
+        : OLLAMA_COMPACT_PROMPT;
+  const persona = task.mode === "rewrite" || task.mode === "reply"
+    ? loadStylePersona(ACTIVE_STYLE).slice(0, 800)
+    : "";
   if (persona) prompt += `\n\nStyle for the rewrite: ${persona}`;
   if (instruction) prompt += `\n\nAdditional instruction: ${instruction}`;
   return prompt;
@@ -560,7 +1340,7 @@ function cleanOllamaOutput(out, text, task) {
   if (!OLLAMA_PREAMBLE.test(text)) o = o.replace(OLLAMA_PREAMBLE, "");
   if (/^["“][^"“”]*["”]$/s.test(o) && !/^["“]/.test(text)) o = o.slice(1, -1).trim();
   if (!o) throw new Error("Ollama returned empty result");
-  if (!task.reply && normalizeText(splitFlags(o, text).rewrite) === normalizeText(text))
+  if (task.mode === "rewrite" && normalizeText(splitFlags(o, text).rewrite) === normalizeText(text))
     throw new Error(`Ollama (${OLLAMA_MODEL}) returned the draft unchanged`);
   return o;
 }
@@ -598,7 +1378,12 @@ function splitFlags(out, draft) {
   return { rewrite: lines.slice(0, i).join("\n").trimEnd(), flags };
 }
 
-function buildSystemPrompt(instruction) {
+function buildSystemPrompt(instruction, task) {
+  if (task?.mode === "prompt" || task?.mode === "ask") {
+    let prompt = "You are Revoice. Follow the user's task exactly and output only the requested result.";
+    if (instruction) prompt += `\n\nAdditional instruction: ${instruction}`;
+    return prompt;
+  }
   let prompt = loadPrompt(ACTIVE_STYLE);
   for (const s of loadSkills()) {
     prompt += `\n\nSKILL "${s.name}" — apply these rules strictly and silently to the rewrite (never mention them):\n${s.body}`;
@@ -686,7 +1471,7 @@ function findClaude() {
 function rewriteWithClaude(text, instruction, ms, task) {
   const bin = findClaude();
   if (!bin) return Promise.reject(new Error("claude CLI not found (npm i -g @anthropic-ai/claude-code)"));
-  let prompt = buildSystemPrompt(instruction) + "\n\n" + buildTaskMessage(text, task);
+  let prompt = buildSystemPrompt(instruction, task) + "\n\n" + buildTaskMessage(text, task);
   if (task.images.length) {
     prompt +=
       "\n\nScreenshot file(s) of the conversation — read each with your Read tool before drafting:\n" +
@@ -749,7 +1534,7 @@ function findCodex() {
 function rewriteWithCodex(text, instruction, ms, task) {
   const bin = findCodex();
   if (!bin) return Promise.reject(new Error("codex CLI not found (npm i -g @openai/codex)"));
-  const prompt = buildSystemPrompt(instruction) + "\n\n" + buildTaskMessage(text, task);
+  const prompt = buildSystemPrompt(instruction, task) + "\n\n" + buildTaskMessage(text, task);
   const outFile = path.join(
     os.tmpdir(),
     `revoice-codex-${process.pid}-${Date.now()}.txt`
@@ -811,7 +1596,7 @@ function codexErrorSummary(stderr) {
 // Chat Completions over any OpenAI-compatible endpoint (OpenAI itself, Moonshot/Kimi, …).
 async function rewriteWithChatCompletions(p, text, instruction, onChunk, task, signal) {
   if (!p.key) throw new Error(`${p.keyVar} not set`);
-  const system = buildSystemPrompt(instruction);
+  const system = buildSystemPrompt(instruction, task);
   const url = `${p.url}/chat/completions`;
   const userText = buildUserMessage(text, task);
   // OpenAI vision format: content becomes an array of parts when images are attached
@@ -909,12 +1694,30 @@ function resolveChain(spec) {
 }
 
 function parseArgs(argv) {
-  const args = { backend: null, instruction: "", style: "", stream: false, logHistory: false, reply: false, context: "", images: [] };
+  const args = {
+    backend: null, instruction: "", style: "", stream: false, logHistory: false,
+    reply: false, prompt: false, ask: false, context: "", images: [],
+    app: "", windowTitle: "", remember: null, syncContext: false,
+    contextStatus: false, doctor: false,
+  };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--stream") args.stream = true;
     else if (a === "--log-history") args.logHistory = true;
     else if (a === "--reply") args.reply = true;
+    else if (a === "--prompt") args.prompt = true;
+    else if (a === "--ask") args.ask = true;
+    else if (a === "--window-title" || a === "--app" || a === "--remember") {
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error(`revoice: ${a} requires a value`);
+        process.exit(1);
+      }
+      if (a === "--window-title") args.windowTitle = value;
+      else if (a === "--app") args.app = value;
+      else args.remember = value;
+    } else if (a === "--sync-context") args.syncContext = true;
+    else if (a === "--context-status") args.contextStatus = true;
     else if (a === "--context") {
       args.context = argv[++i];
       if (args.context === undefined) {
@@ -993,17 +1796,7 @@ function parseArgs(argv) {
       const inst = spawnSync("bash", [path.join(src, "install.sh")], { stdio: "inherit", env: { ...process.env, HOME: os.homedir() } });
       process.exit(inst.status ?? 1);
     } else if (a === "--doctor") {
-      const { chain } = resolveChain(process.env.REWRITE_BACKEND);
-      const codex = findCodex();
-      const claude = findClaude();
-      console.log(`backend chain: ${chain.join(" → ")}  (REWRITE_BACKEND=${process.env.REWRITE_BACKEND || "<unset>"})`);
-      console.log(`codex:  ${codex ? `${codex}  (model ${CODEX_MODEL})` : "NOT FOUND — npm i -g @openai/codex, or set CODEX_BIN in ~/.revoice/env"}`);
-      console.log(`claude: ${claude || "NOT FOUND — npm i -g @anthropic-ai/claude-code, or set CLAUDE_BIN in ~/.revoice/env"}`);
-      console.log(`openai: ${OPENAI_API_KEY ? `key set  (${OPENAI_API_URL}, model ${OPENAI_MODEL}, effort ${OPENAI_REASONING_EFFORT})` : "no OPENAI_API_KEY (optional: paid API, faster than codex)"}`);
-      console.log(`kimi:   ${process.env.KIMI_API_KEY ? `key set  (${KIMI_API_URL}, model ${KIMI_MODEL})` : "no KIMI_API_KEY"}`);
-      console.log(`ollama: ${OLLAMA_URL}  (model ${OLLAMA_MODEL}, prompt ${OLLAMA_PROMPT})`);
-      console.log(`PATH:   ${process.env.PATH || ""}`);
-      process.exit(codex || claude || OPENAI_API_KEY || process.env.KIMI_API_KEY ? 0 : 1);
+      args.doctor = true;
     } else if (a === "--skills") {
       const skills = loadSkills();
       if (!skills.length) console.log(`No skills loaded (put .md files in ${SKILLS_DIR})`);
@@ -1019,7 +1812,9 @@ function parseArgs(argv) {
     else if (a === "--help" || a === "-h") {
       console.log(
         "Usage: echo TEXT | revoice [--backend auto|claude|codex|openai|kimi|ollama|CHAIN] [--instruction TEXT] [--style founder|casual|professional|concise|NAME] [--stream] [--log-history] [--history] [--mark-last accepted|rejected] [--skills] [--doctor] [--update]\n" +
-        "       echo NOTES | revoice --reply [--context TEXT] [--image FILE]...   (draft a reply in your voice; NOTES may be empty)"
+        "       echo NOTES | revoice --reply [--context TEXT] [--image FILE]... [--app NAME] [--window-title TEXT]\n" +
+        "       echo TEXT | revoice --prompt | --ask\n" +
+        "       revoice --remember TEXT | --sync-context | --context-status"
       );
       process.exit(0);
     } else {
@@ -1078,24 +1873,120 @@ function withTimeout(promise, ms, label, onTimeout) {
   ]);
 }
 
+function doctorLines() {
+  const { chain } = resolveChain(process.env.REWRITE_BACKEND);
+  const codex = findCodex();
+  const claude = findClaude();
+  return {
+    codex,
+    claude,
+    lines: [
+      `backend chain: ${chain.join(" → ")}  (REWRITE_BACKEND=${process.env.REWRITE_BACKEND || "<unset>"})`,
+      `codex:  ${codex ? `${codex}  (model ${CODEX_MODEL})` : "NOT FOUND — npm i -g @openai/codex, or set CODEX_BIN in ~/.revoice/env"}`,
+      `claude: ${claude || "NOT FOUND — npm i -g @anthropic-ai/claude-code, or set CLAUDE_BIN in ~/.revoice/env"}`,
+      `openai: ${OPENAI_API_KEY ? `key set  (${OPENAI_API_URL}, model ${OPENAI_MODEL}, effort ${OPENAI_REASONING_EFFORT})` : "no OPENAI_API_KEY (optional: paid API, faster than codex)"}`,
+      `kimi:   ${process.env.KIMI_API_KEY ? `key set  (${KIMI_API_URL}, model ${KIMI_MODEL})` : "no KIMI_API_KEY"}`,
+      `ollama: ${OLLAMA_URL}  (model ${OLLAMA_MODEL}, prompt ${OLLAMA_PROMPT})`,
+      `PATH:   ${process.env.PATH || ""}`,
+    ],
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv);
+  if (args.remember !== null) {
+    fs.mkdirSync(CONTEXT_DIR, { recursive: true, mode: 0o700 });
+    const line = `- ${new Date().toISOString().slice(0, 10)} ${args.remember}\n`;
+    fs.appendFileSync(path.join(CONTEXT_DIR, "notes.md"), line, { encoding: "utf8", mode: 0o600 });
+    console.log("remembered");
+    return;
+  }
+  if (args.syncContext) {
+    try {
+      const body = await syncZoeyContext();
+      console.log(`synced Zoey context (${body.length} chars)`);
+      return;
+    } catch (error) {
+      console.error(`revoice: could not sync Zoey context: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  if (args.contextStatus || args.doctor) {
+    if (args.doctor) {
+      const doctor = doctorLines();
+      for (const line of doctor.lines) console.log(line);
+    }
+    for (const line of await contextStatus()) console.log(line);
+    if (args.doctor) {
+      const doctor = doctorLines();
+      process.exitCode = doctor.codex || doctor.claude || OPENAI_API_KEY || process.env.KIMI_API_KEY ? 0 : 1;
+    }
+    return;
+  }
   ACTIVE_STYLE = args.style;
   if (args.style) loadPrompt(args.style); // validate the style up front
 
-  const text = (await readStdin()).trim();
-  const task = { reply: args.reply, context: args.context.trim(), images: args.images };
-  if (!task.reply && (task.context || task.images.length)) {
+  const selectedModes = [args.reply, args.prompt, args.ask].filter(Boolean).length;
+  if (selectedModes > 1) {
+    console.error("revoice: --reply, --prompt, and --ask are mutually exclusive");
+    process.exit(1);
+  }
+  const mode = args.reply ? "reply" : args.prompt ? "prompt" : args.ask ? "ask" : "rewrite";
+  let text = (await readStdin()).trim();
+  const task = {
+    mode,
+    context: (args.context || "").trim(),
+    images: args.images,
+    app: args.app,
+    windowTitle: args.windowTitle,
+  };
+  const originalForHistory = text || task.context;
+  if (mode !== "reply" && (task.context || task.images.length)) {
     console.error("revoice: --context/--image only apply with --reply");
     process.exit(1);
   }
-  if (!text && !task.reply) {
+  if (!text && mode !== "reply") {
     console.error("revoice: no input text on stdin");
     process.exit(1);
   }
-  if (!text && !task.context && !task.images.length) {
-    console.error("revoice: reply mode needs notes on stdin, --context, or --image");
+  const gathered = await gatherContext({
+    mode,
+    text,
+    context: task.context,
+    windowTitle: task.windowTitle,
+    app: task.app,
+    hasImage: task.images.length > 0,
+  });
+  task.contextBlocks = gathered.blocks;
+  for (const block of task.contextBlocks)
+    console.error(`context:${block.source === "availability" ? "calendar" : block.source}`);
+  if (!text && !task.context && !task.images.length && !task.contextBlocks.length) {
+    console.error("revoice: nothing to reply to");
     process.exit(1);
+  }
+
+  let unmaskOutput = (value) => value;
+  task.maskCount = 0;
+  if (process.env.REVOICE_MASK !== "off") {
+    const masker = createMasker([
+      text,
+      task.context,
+      task.windowTitle,
+      task.app,
+      ...task.contextBlocks.flatMap((block) => [block.body, block.title]),
+    ], { privateTerms: readPrivateTerms() });
+    text = masker.mask(text);
+    task.context = masker.mask(task.context);
+    task.windowTitle = masker.mask(task.windowTitle);
+    task.app = masker.mask(task.app);
+    for (const block of task.contextBlocks) {
+      block.body = masker.mask(block.body);
+      block.title = masker.mask(block.title);
+    }
+    unmaskOutput = (value) => masker.unmask(value);
+    task.maskCount = masker.count;
+    if (task.maskCount > 0) console.error("context:masked");
   }
 
   const deadline = Date.now() + REWRITE_TIMEOUT_MS;
@@ -1104,14 +1995,26 @@ async function main() {
   // then only needs to flush whatever wasn't already streamed. Ollama is
   // buffered so its output can be cleaned/rejected before any of it is shown.
   let streamedChars = 0;
+  let pendingPh = "";
   const flush = (s) => {
     streamedChars += s.length;
-    process.stdout.write(s);
+    let released = pendingPh + s;
+    pendingPh = "";
+    let open = released.lastIndexOf("[");
+    if (open >= 0 && open > released.lastIndexOf("]")) {
+      while (open > 0 && released[open - 1] === "[") open--;
+      const holdback = released.slice(open);
+      if (holdback.length <= 24) {
+        pendingPh = holdback;
+        released = released.slice(0, open);
+      }
+    }
+    process.stdout.write(unmaskOutput(released));
   };
   // Streamed text is forwarded line by line; a line that starts like `FLAGS:` (or could still
   // become one) is held back so the flags never reach stdout/the HUD.
   let held = "", lineStart = true, flagsSeen = false;
-  const resetStream = () => { held = ""; lineStart = true; flagsSeen = false; };
+  const resetStream = () => { held = ""; lineStart = true; flagsSeen = false; pendingPh = ""; };
   const flagsOff = draftHasFlagsLine(text);
   const onChunk = args.stream
     ? (delta) => {
@@ -1135,23 +2038,25 @@ async function main() {
       }
     : null;
   const emit = (raw, via) => {
-    const { rewrite: out, flags } = splitFlags(raw, text);
+    const { rewrite: rawOut, flags } = splitFlags(raw, text);
+    const out = unmaskOutput(rawOut);
     if (via) console.error(`via:${via}`);
     for (const f of flags) console.error(`flag:${f}`);
     if (args.logHistory) {
       appendHistory({
         ts: new Date().toISOString(),
-        original: (text || task.context).slice(0, 2000),
+        original: originalForHistory.slice(0, 2000),
         rewrite: out.slice(0, 2000),
         style: args.style || "",
         instruction: args.instruction || "",
-        ...(task.reply && { mode: "reply", images: task.images.length }),
+        ...(task.mode !== "rewrite" && { mode: task.mode, images: task.images.length }),
         ...(flags.length && { flags }),
         via,
       });
     }
-    const rest = out.length > streamedChars ? out.slice(streamedChars) : "";
-    process.stdout.write(rest, () => process.exit(0));
+    const rest = pendingPh + (rawOut.length > streamedChars ? rawOut.slice(streamedChars) : "");
+    pendingPh = "";
+    process.stdout.write(unmaskOutput(rest), () => process.exit(0));
   };
   const remaining = (min) => Math.max(deadline - Date.now(), min);
   const cliBudget = (envName) => {
@@ -1206,7 +2111,11 @@ async function main() {
   process.exit(1);
 }
 
-main().catch((e) => {
-  console.error("revoice: " + (e?.message || e));
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((e) => {
+    console.error("revoice: " + (e?.message || e));
+    process.exit(1);
+  });
+}
+
+export { zoCall, gatherContext, computeFreeSlots, parseBusyIntervals, buildTaskMessage, createMasker };

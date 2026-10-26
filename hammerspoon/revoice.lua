@@ -5,8 +5,9 @@
 -- ⌃⇧2 : rewrite in Casual style (relaxed, friendly)
 -- ⌃⇧3 : rewrite in Professional style (polished business)
 -- ⌃⇧4 : rewrite in Concise style (half the words)
--- ⌃⇧R : Reply mode — screenshots the frontmost window, asks what you want to
---       say, and drafts the reply in your voice (Codex/Astra reads the shot)
+-- ⌃⇧R : one-press context-aware reply from the screen and selected text
+-- ⌃⇧P : turn a selected rough request into a useful AI prompt
+-- ⌃⇧A : answer a selected question (or enter one) using context
 --
 -- The rewrite streams into a glowing orb HUD, then lands in a preview:
 --   ⏎ paste it · R regenerate · 1–4 re-run in a style · esc keep original
@@ -281,12 +282,18 @@ local function markLast(outcome, andThen)
 end
 
 -- rewrite preview popover: a liquid-glass card ---------------------------------
-local function previewHTML(result, title, flags)
+local function previewHTML(result, title, flags, usedSources)
   local flagHTML = ""
   if flags and #flags > 0 then
     local chips = {}
     for _, f in ipairs(flags) do chips[#chips + 1] = '<span class="flag">⚑ ' .. htmlEscape(f) .. '</span>' end
     flagHTML = '<div class="flags">' .. table.concat(chips) .. '</div>'
+  end
+  local usedHTML = ""
+  if usedSources and #usedSources > 0 then
+    local sources = {}
+    for _, source in ipairs(usedSources) do sources[#sources + 1] = htmlEscape(source) end
+    usedHTML = '<div class="used">used: ' .. table.concat(sources, " · ") .. '</div>'
   end
   return [[<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 ]] .. GLASS_CSS .. [[
@@ -299,6 +306,7 @@ local function previewHTML(result, title, flags)
 .flags{flex:none;display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .flag{color:#ffe3a3;font-size:11px;padding:3px 10px;border-radius:999px;
   background:rgba(255,190,70,.16);border:1px solid rgba(255,200,90,.45)}
+.used{color:rgba(255,255,255,.5);font-size:10px;flex:none;margin-top:8px}
 .hints{flex:none;display:flex;gap:8px;margin-top:10px}
 .chip{color:rgba(255,255,255,.85);font-size:11px;padding:3px 10px;
   border-radius:999px;background:rgba(255,255,255,.12);
@@ -307,7 +315,7 @@ local function previewHTML(result, title, flags)
 <div class="blobs"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
 <div class="glass">
   <div class="title">✨ ]] .. htmlEscape(title) .. [[</div>
-  <div class="body">]] .. htmlEscape(result) .. [[</div>]] .. flagHTML .. [[
+  <div class="body">]] .. htmlEscape(result) .. [[</div>]] .. flagHTML .. usedHTML .. [[
 
   <div class="hints">
     <span class="chip">⏎ paste</span><span class="chip">R regenerate</span>
@@ -317,6 +325,7 @@ local function previewHTML(result, title, flags)
 end
 
 local preview = { wv = nil, modal = nil, watchdog = nil, tap = nil }
+local rewriteActive = false
 
 -- reply mode: snapshot the frontmost window to a temp PNG (nil if the
 -- snapshot fails, e.g. Screen Recording permission not granted yet)
@@ -360,8 +369,14 @@ local function previewShow(result, ctx)
   local textH = measure:minimumTextSize(styled).h
   measure:delete()
   local flags = ctx.flags or {}
-  local h = math.min(math.max(textH * 1.1 + 96, 150), screen.h * 0.6) + 36 * math.ceil(#flags / 2)
-  local title = ctx.extra and ctx.extra.reply and "reply ready" or "rewrite ready"
+  local usedSources = ctx.usedSources or {}
+  local h = math.min(math.max(textH * 1.1 + 96, 150), screen.h * 0.6)
+    + 36 * math.ceil(#flags / 2) + (#usedSources > 0 and 20 or 0)
+  local mode = ctx.extra and (ctx.extra.mode or (ctx.extra.reply and "reply"))
+  local title = mode == "reply" and "reply ready"
+    or mode == "ask" and "answer ready"
+    or mode == "prompt" and "prompt ready"
+    or "rewrite ready"
   if ctx.style and ctx.style ~= "" then title = title .. " · " .. ctx.style end
   if ctx.via then title = title .. " · " .. ctx.via end
   preview.wv = hs.webview.new({
@@ -373,7 +388,7 @@ local function previewShow(result, ctx)
   preview.wv:transparent(true)
   preview.wv:allowTextEntry(false)
   preview.wv:level(hs.canvas.windowLevels.overlay)
-  preview.wv:html(previewHTML(result, title, flags))
+  preview.wv:html(previewHTML(result, title, flags, usedSources))
   preview.wv:show(0.15)
 
   preview.modal = hs.hotkey.modal.new()
@@ -470,8 +485,9 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
   end
 
   targetWindow = targetWindow or hs.window.frontmostWindow()
+  local mode = extra and (extra.mode or (extra.reply and "reply"))
   local hudLabel = style
-  if extra and extra.reply then hudLabel = style and (style .. " reply") or "reply" end
+  if mode then hudLabel = style and (style .. " " .. mode) or mode end
   hudStart(hudLabel)
 
   local args = { CLI, "--stream", "--log-history" }
@@ -483,7 +499,7 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
     table.insert(args, "--style")
     table.insert(args, style)
   end
-  if extra and extra.reply then
+  if mode == "reply" then
     table.insert(args, "--reply")
     if extra.image and hs.fs.attributes(extra.image) then
       table.insert(args, "--image")
@@ -493,10 +509,23 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
       table.insert(args, "--context")
       table.insert(args, extra.context)
     end
+  elseif mode == "prompt" then
+    table.insert(args, "--prompt")
+  elseif mode == "ask" then
+    table.insert(args, "--ask")
+  end
+  if extra and extra.app and extra.app ~= "" then
+    table.insert(args, "--app")
+    table.insert(args, extra.app)
+  end
+  if extra and extra.windowTitle and extra.windowTitle ~= "" then
+    table.insert(args, "--window-title")
+    table.insert(args, extra.windowTitle)
   end
 
   local collected, collectedErr = "", ""
   local task = hs.task.new(node, function(exitCode, stdOut, stdErr)
+    rewriteActive = false
     -- guard against a final callback that re-delivers the full buffer
     if stdOut and stdOut ~= "" and stdOut ~= collected then
       collected = collected .. stdOut
@@ -508,9 +537,17 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
       local via = collectedErr:match("via:(%w+)")
       local flags = {}
       for f in collectedErr:gmatch("flag:([^\n]+)") do flags[#flags + 1] = f end
+      local usedSources, seenSources = {}, {}
+      for source in collectedErr:gmatch("context:([%w%-]+)") do
+        if not seenSources[source] then
+          seenSources[source] = true
+          usedSources[#usedSources + 1] = source
+        end
+      end
       hs.timer.doAfter(0.4, function()
         previewShow(result, {
           flags = flags,
+          usedSources = usedSources,
           sel = sel,
           oldClipboard = oldClipboard,
           instruction = instruction,
@@ -525,10 +562,14 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
       hudStop()
       restoreClipboard(oldClipboard)
       local err = collectedErr
+      err = err:gsub("context:[%w%-]+[^\n]*\n", "")
+      err = err:gsub("context:[%w%-]+[^\n]*$", "")
+      err = err:gsub("^%s+", ""):gsub("%s+$", "")
       if not err or err == "" then err = "unknown error" end
-      hs.alert.show((extra and extra.reply and "Reply" or "Rewrite") .. " failed: " .. err, 4)
+      local failureLabel = mode == "reply" and "Reply" or mode == "ask" and "Ask" or mode == "prompt" and "Prompt" or "Rewrite"
+      hs.alert.show(failureLabel .. " failed: " .. err, 4)
     end
-    if extra and extra.reply then
+    if mode == "reply" then
       cleanupReplyImages()
       hs.timer.doAfter(125, cleanupReplyImages)
     end
@@ -548,7 +589,9 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
   end
   task:setEnvironment(taskEnv())
   task:setInput(sel or "")
+  rewriteActive = true
   if not task:start() then
+    rewriteActive = false
     hudStop()
     restoreClipboard(oldClipboard)
     hs.alert.show("revoice: failed to launch CLI", 4)
@@ -565,6 +608,36 @@ local function withSelection(fn)
     return
   end
   fn(sel, oldClipboard)
+end
+
+local function currentWindowContext(targetWindow)
+  local app = hs.application.frontmostApplication()
+  local name, title = "", ""
+  if app then pcall(function() name = app:name() or "" end) end
+  if targetWindow then pcall(function() title = targetWindow:title() or "" end) end
+  return name or "", title or ""
+end
+
+local function runSelectedMode(mode)
+  local targetWindow = hs.window.frontmostWindow()
+  local app, title = currentWindowContext(targetWindow)
+  local sel, old = getSelection()
+  if mode == "ask" and (not sel or sel == "") then
+    local ok, question = hs.dialog.textPrompt(
+      "Ask with context",
+      "What would you like to know?",
+      "", "Ask", "Cancel"
+    )
+    if ok ~= "Ask" then restoreClipboard(old); return end
+    sel = question or ""
+  elseif not sel or sel == "" then
+    restoreClipboard(old)
+    hs.alert.show("revoice: no text selected")
+    return
+  end
+  doRewrite(sel, old, nil, nil, targetWindow, {
+    mode = mode, app = app, windowTitle = title,
+  })
 end
 
 -- ⌃⇧Z: default rewrite, tone auto-picked from the frontmost app
@@ -596,14 +669,19 @@ hs.hotkey.bind({ "ctrl", "shift" }, "e", function()
   end)
 end)
 
--- ⌃⇧R: Reply mode — screenshot the frontmost window (the thread you're in),
--- ask what you want to say, draft the reply in your voice, preview, paste.
--- Any selected text is sent along as extra context. The screenshot goes to
--- whichever backend answers (Codex/Astra reads it natively) and is deleted
--- from ~/.revoice/tmp after the preview closes.
-hs.hotkey.bind({ "ctrl", "shift" }, "r", function()
+hs.hotkey.bind({ "ctrl", "shift" }, "p", function()
+  runSelectedMode("prompt")
+end)
+
+hs.hotkey.bind({ "ctrl", "shift" }, "a", function()
+  runSelectedMode("ask")
+end)
+
+local function oneTapReply()
+  if rewriteActive then return end
   local targetWindow = hs.window.frontmostWindow()
   local style = styleForFrontmostApp()
+  local app, title = currentWindowContext(targetWindow)
   local image = captureFrontmostWindow()
   local sel, old = getSelection()
   if not image and (not sel or sel == "") then
@@ -611,20 +689,183 @@ hs.hotkey.bind({ "ctrl", "shift" }, "r", function()
     hs.alert.show("revoice: couldn't screenshot the window — allow Screen Recording for Hammerspoon, or select the message first", 5)
     return
   end
-  local ok, notes = hs.dialog.textPrompt(
-    "Reply in your voice",
-    image and "What do you want to say? (rough notes, or leave empty to let it infer from the screen)"
-      or "What do you want to say? (rough notes, or leave empty to reply to the selected text)",
-    "", "Draft reply", "Cancel"
-  )
-  if ok ~= "Draft reply" then
-    restoreClipboard(old)
-    if image then os.remove(image) end
-    return
-  end
   if targetWindow then targetWindow:focus() end
-  doRewrite(notes or "", old, nil, style, targetWindow, { reply = true, image = image, context = sel })
+  doRewrite(sel or "", old, nil, style, targetWindow, {
+    mode = "reply", reply = true, image = image, app = app, windowTitle = title,
+  })
+end
+
+-- ⌃⇧R: selected text is optional reply notes; the screen and selection supply context.
+hs.hotkey.bind({ "ctrl", "shift" }, "r", function()
+  oneTapReply()
 end)
+
+local floatingEnabled = true
+if hs.settings and type(hs.settings.get) == "function" then
+  local setting = hs.settings.get("revoice.floatingButton")
+  if setting ~= nil then floatingEnabled = setting end
+end
+local floatingButton, floatingFrame
+
+local function hideFloatingButton()
+  if floatingButton then
+    floatingButton:delete(0)
+    floatingButton = nil
+    floatingFrame = nil
+  end
+end
+
+local function axValue(element, name)
+  local ok, value = pcall(function() return element:attributeValue(name) end)
+  return ok and value or nil
+end
+
+local function rectTable(frame)
+  if not frame then return nil end
+  if type(frame) == "table" then
+    if frame.x and frame.y and frame.w and frame.h then return frame end
+    if frame.origin and frame.size then
+      return { x = frame.origin.x, y = frame.origin.y, w = frame.size.w, h = frame.size.h }
+    end
+  end
+  local ok, rect = pcall(function() return frame:asTable() end)
+  if ok and rect then return rectTable(rect) end
+  local okX, x = pcall(function() return frame.x end)
+  local okY, y = pcall(function() return frame.y end)
+  local okW, w = pcall(function() return frame.w end)
+  local okH, h = pcall(function() return frame.h end)
+  if okX and okY and okW and okH and x and y and w and h then
+    return { x = x, y = y, w = w, h = h }
+  end
+  return nil
+end
+
+local function appIsExcluded(app)
+  if not app then return true end
+  local name, bundle = "", ""
+  pcall(function() name = app:name() or "" end)
+  pcall(function() bundle = app:bundleID() or "" end)
+  local value = (name .. " " .. bundle):lower()
+  for _, excluded in ipairs({ "terminal", "iterm", "visual studio code", "com.microsoft.vscode", "cursor", "hammerspoon", "revoice" }) do
+    if value:find(excluded, 1, true) then return true end
+  end
+  return false
+end
+
+local function focusedTextBox()
+  if not hs.axuielement or type(hs.axuielement.systemWideElement) ~= "function" then return nil end
+  local ok, system = pcall(hs.axuielement.systemWideElement)
+  if not ok or not system then return nil end
+  local focused = axValue(system, "AXFocusedUIElement")
+  if not focused then return nil end
+  local role = axValue(focused, "AXRole")
+  local editable = axValue(focused, "AXEditableAncestor")
+  local textRoles = {
+    AXTextArea = true, AXTextField = true, AXComboBox = true, AXSearchField = true,
+  }
+  if not textRoles[role] and not editable then return nil end
+  return focused
+end
+
+local function pointInFrame(point, frame)
+  if not point or not frame then return false end
+  return point.x >= frame.x and point.x <= frame.x + frame.w
+    and point.y >= frame.y and point.y <= frame.y + frame.h
+end
+
+local function showFloatingButton(focused, clickPoint)
+  hideFloatingButton()
+  local screen = hs.screen.mainScreen():frame()
+  local frame = rectTable(axValue(focused, "AXFrame"))
+  if frame and frame.w <= screen.w * 0.8 and frame.h <= screen.h * 0.8 then
+    floatingFrame = {
+      x = frame.x + frame.w - 58,
+      y = frame.y + frame.h - 58,
+      w = 28,
+      h = 28,
+    }
+  else
+    local point = clickPoint or (hs.mouse and hs.mouse.absolutePosition and hs.mouse.absolutePosition())
+      or { x = screen.x, y = screen.y }
+    floatingFrame = { x = point.x + 12, y = point.y + 12, w = 28, h = 28 }
+  end
+  floatingFrame.x = math.max(screen.x, math.min(floatingFrame.x, screen.x + screen.w - 28))
+  floatingFrame.y = math.max(screen.y, math.min(floatingFrame.y, screen.y + screen.h - 28))
+  floatingButton = hs.canvas.new(floatingFrame)
+  floatingButton:appendElements({
+    {
+      type = "circle", action = "strokeAndFill",
+      frame = { x = 0, y = 0, w = 28, h = 28 },
+      fillColor = { red = 0.16, green = 0.13, blue = 0.28, alpha = 0.9 },
+      strokeColor = { white = 1, alpha = 0.8 }, strokeWidth = 1,
+    },
+    {
+      type = "text", text = "✍️", textSize = 15, textAlignment = "center",
+      textColor = { white = 1 }, frame = { x = 0, y = 1, w = 28, h = 26 },
+    },
+  })
+  if floatingButton.clickActivating then floatingButton:clickActivating(false) end
+  if floatingButton.level then
+    floatingButton:level((hs.canvas.windowLevels and hs.canvas.windowLevels.floating) or hs.canvas.windowLevels.overlay)
+  end
+  if floatingButton.mouseCallback then
+    floatingButton:mouseCallback(function(_, message)
+      if message == "mouseUp" or message == "mouseUpOutside" then
+        hideFloatingButton()
+        oneTapReply()
+      end
+    end)
+  end
+  floatingButton:show()
+end
+
+local mouseUpType = hs.eventtap and hs.eventtap.event and hs.eventtap.event.types
+  and hs.eventtap.event.types.leftMouseUp
+local keyDownType = hs.eventtap and hs.eventtap.event and hs.eventtap.event.types
+  and hs.eventtap.event.types.keyDown
+if hs.eventtap and type(hs.eventtap.new) == "function" and mouseUpType and keyDownType then
+  local floatingTap = hs.eventtap.new({ mouseUpType, keyDownType }, function(event)
+    local eventType = event:getType()
+    if eventType == keyDownType then
+      local escape = hs.keycodes and hs.keycodes.map and (hs.keycodes.map.escape or hs.keycodes.map.esc)
+      if escape and event:getKeyCode() == escape then hideFloatingButton() end
+      return false
+    end
+    local clickPoint = hs.mouse and hs.mouse.absolutePosition and hs.mouse.absolutePosition()
+    if floatingFrame and pointInFrame(clickPoint, floatingFrame) then return false end
+    if not floatingEnabled or appIsExcluded(hs.application.frontmostApplication()) then
+      hideFloatingButton()
+      return false
+    end
+    hs.timer.doAfter(0.15, function()
+      local focused = focusedTextBox()
+      local frame = focused and rectTable(axValue(focused, "AXFrame"))
+      if focused and (not frame or pointInFrame(clickPoint, frame)) then
+        showFloatingButton(focused, clickPoint)
+      else
+        hideFloatingButton()
+      end
+    end)
+    return false
+  end)
+  floatingTap:start()
+end
+
+if hs.application and hs.application.watcher and type(hs.application.watcher.new) == "function" then
+  local watcher = hs.application.watcher.new(function()
+    hideFloatingButton()
+  end)
+  watcher:start()
+end
+
+local function setFloatingEnabled(enabled)
+  floatingEnabled = enabled
+  if hs.settings and type(hs.settings.set) == "function" then
+    hs.settings.set("revoice.floatingButton", enabled)
+  end
+  if not enabled then hideFloatingButton() end
+  if menubarRefresh then menubarRefresh() end
+end
 
 -- menu bar: recent rewrites, styles, voice sync -------------------------------
 local menubar = hs.menubar.new()
@@ -723,6 +964,37 @@ local function runDoctor()
   task:start()
 end
 
+local function runContextAction(args, label)
+  local node = findNode()
+  if not node then hs.alert.show("revoice: node not found — brew install node", 4); return end
+  local task = hs.task.new(node, function(exitCode, stdOut, stdErr)
+    local result = (stdOut or ""):gsub("%s+$", "")
+    if result == "" then result = (stdErr or ""):gsub("%s+$", "") end
+    if result == "" then result = label .. (exitCode == 0 and " complete" or " failed") end
+    hs.alert.show(result, 4)
+  end, args)
+  if not task then hs.alert.show("revoice: failed to launch CLI", 4); return end
+  task:setEnvironment(taskEnv())
+  task:setInput("")
+  if task:start() then task:closeInput()
+  else hs.alert.show("revoice: failed to launch CLI", 4) end
+end
+
+local function rememberNote()
+  local ok, note = hs.dialog.textPrompt(
+    "Remember for future replies",
+    "What should Revoice remember?",
+    "", "Remember", "Cancel"
+  )
+  if ok == "Remember" and note and note ~= "" then
+    runContextAction({ CLI, "--remember", note }, "remember")
+  end
+end
+
+local function syncZoeyContext()
+  runContextAction({ CLI, "--sync-context" }, "sync")
+end
+
 local function buildMenu()
   local items = {}
   local recents = readRecentHistory()
@@ -751,6 +1023,14 @@ local function buildMenu()
   end
   table.insert(items, { title = "Backend: " .. (cur == "" and "auto" or cur), menu = picker })
   table.insert(items, { title = "Run doctor", fn = runDoctor })
+  table.insert(items, { title = "-" })
+  table.insert(items, {
+    title = "Floating button",
+    checked = floatingEnabled,
+    fn = function() setFloatingEnabled(not floatingEnabled) end,
+  })
+  table.insert(items, { title = "Remember…", fn = rememberNote })
+  table.insert(items, { title = "Sync Zoey context", fn = syncZoeyContext })
   table.insert(items, { title = "-" })
   table.insert(items, {
     title = "Edit voice samples",
