@@ -129,9 +129,10 @@ eq("R: notes dialog is removed", S.dialogCalls, 0)
 local t = S.tasks[1]
 check("R: screenshot saved under ~/.revoice/tmp/reply-<ms>.png", S.saved and S.saved:sub(1, #HOME) == HOME and S.saved:sub(#HOME + 1):match("^/%.revoice/tmp/reply%-%d+%.png$"), S.saved)
 eq("R: wide snapshot downscaled to 1800", S.resized and S.resized.w, 1800)
-eq("R: argv = CLI --stream --log-history --style casual --reply --image <png> --context <sel>",
-  t.args, { CLI, "--stream", "--log-history", "--style", "casual", "--reply", "--image", S.saved, "--context", "Alex Example: is the SOW done?", "--app", "Slack", "--window-title", "Conversation" })
+eq("R: argv = CLI --stream --log-history --style casual --reply --image <png> plus window context",
+  t.args, { CLI, "--stream", "--log-history", "--style", "casual", "--reply", "--image", S.saved, "--app", "Slack", "--window-title", "Conversation" })
 eq("R: selected text is notes on stdin", t.input, "Alex Example: is the SOW done?")
+eq("R: selected notes are not duplicated as --context", not table.concat(t.args, " "):find("--context", 1, true), true)
 eq("R: target window refocused", #S.focused >= 1, true)
 -- CLI completes -> preview shown, then screenshot swept (fresh file kept; stale sweep + timer)
 t.done(0, "Yep — Friday works. SOW's with Casey Example for sign-off.", "via:codex\n")
@@ -162,8 +163,8 @@ eq("R no shot/no sel: clipboard restored", S.clipboard, "OLD")
 -- 5. snapshot fails but text selected -> text-only reply (no --image)
 reset(); S.snapshotOk = false; S.selection = "Alex Example: ok?"; S.clipboard = "OLD"; S.dialog = { "Draft reply", "yes" }
 S.hotkeys["r"]()
-eq("R no shot + sel: argv has --reply --context, no --image",
-  S.tasks[1].args, { CLI, "--stream", "--log-history", "--style", "casual", "--reply", "--context", "Alex Example: ok?", "--app", "Slack", "--window-title", "Conversation" })
+eq("R no shot + sel: argv has --reply and window context, no --image or --context",
+  S.tasks[1].args, { CLI, "--stream", "--log-history", "--style", "casual", "--reply", "--app", "Slack", "--window-title", "Conversation" })
 eq("R no shot + sel: selected text is stdin notes", S.tasks[1].input, "Alex Example: ok?")
 
 -- 6. plain ⌃⇧Z unchanged
@@ -175,8 +176,8 @@ eq("Z: selection on stdin", S.tasks[1].input, "draft text")
 -- 7. failure path in reply mode labels the alert "Reply failed"
 reset(); S.snapshotOk = true; S.selection = "message"; S.clipboard = "OLD"; S.dialog = { "Draft reply", "x" }
 S.hotkeys["r"]()
-S.tasks[1].done(1, "", "codex exited 1: ERROR: boom")
-check("R failure: alert says Reply failed", S.alerts[#S.alerts]:match("^Reply failed: codex exited 1"), S.alerts[#S.alerts])
+S.tasks[1].done(1, "", "context:contacts\ncontext:calendar\ncodex exited 1: ERROR: boom\n")
+eq("R failure: alert strips context source tags", S.alerts[#S.alerts], "Reply failed: codex exited 1: ERROR: boom")
 eq("R failure: clipboard restored", S.clipboard, "OLD")
 
 -- Prompt and ask hotkeys pass their mode and on-screen context to the CLI.

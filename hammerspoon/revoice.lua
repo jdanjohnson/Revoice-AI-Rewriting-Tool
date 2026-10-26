@@ -562,6 +562,9 @@ doRewrite = function(sel, oldClipboard, instruction, style, targetWindow, extra)
       hudStop()
       restoreClipboard(oldClipboard)
       local err = collectedErr
+      err = err:gsub("context:[%w%-]+[^\n]*\n", "")
+      err = err:gsub("context:[%w%-]+[^\n]*$", "")
+      err = err:gsub("^%s+", ""):gsub("%s+$", "")
       if not err or err == "" then err = "unknown error" end
       local failureLabel = mode == "reply" and "Reply" or mode == "ask" and "Ask" or mode == "prompt" and "Prompt" or "Rewrite"
       hs.alert.show(failureLabel .. " failed: " .. err, 4)
@@ -688,7 +691,7 @@ local function oneTapReply()
   end
   if targetWindow then targetWindow:focus() end
   doRewrite(sel or "", old, nil, style, targetWindow, {
-    mode = "reply", reply = true, image = image, context = sel, app = app, windowTitle = title,
+    mode = "reply", reply = true, image = image, app = app, windowTitle = title,
   })
 end
 

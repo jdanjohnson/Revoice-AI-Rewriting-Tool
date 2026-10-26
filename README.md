@@ -113,9 +113,9 @@ Switch between them anytime from the ✍️ menu-bar icon → **Backend** (no co
 
 Select some text, press **⌃⇧Z**, and enjoy.
 
-## Why Revoice exists
+## Who made this
 
-Revoice is a small, configurable tool for drafting and rewriting text with the AI tools you already use. Keep your prompts, writing samples, and optional context files on your own machine and choose which backend receives each request.
+Hi, I'm [Ja'dan Johnson](https://github.com/jdanjohnson) — a founder who writes a *lot* of Slack messages, emails, and strategy docs, and got tired of paying for yet another tool just to make them sound like me on a good day. So I built revoice as a fun side project: one hotkey, my own prompt, powered by the AI subscriptions I already had. It made my writing faster and more fun, so I'm sharing it. I hope it does the same for you.
 
 ## Want the nerdy details?
 
