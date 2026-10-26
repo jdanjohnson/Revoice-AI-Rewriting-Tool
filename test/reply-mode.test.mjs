@@ -113,6 +113,9 @@ const FLAGS_INSTRUCTION =
 const SYS = "TEST PROMPT: never reply, only rewrite." + FLAGS_INSTRUCTION;
 const NOTES = "yes but not before friday — need Casey Example's sign-off on the SOW first";
 const CTX = "Alex Example: can we ship the Q3 deck tomorrow?\nAlex Example: also is the SOW done";
+const MASKED_NOTES = "yes but not before friday — need [[PERSON_1]] sign-off on the SOW first";
+const MASK_INSTRUCTION =
+  "Placeholders like [[PERSON_1]] stand for real values; copy them exactly where needed and never guess what they are.";
 const HEAD =
   "REPLY MODE (this overrides any rule above about never replying): draft the author's reply to a conversation. " +
   "Do not rewrite the notes below; use them (and the conversation) to write what the author would send next. " +
@@ -121,12 +124,16 @@ const IMG_LINE = "\nThe attached screenshot shows the conversation the author is
 const TAIL =
   "\n\nOutput only the reply, ready to send, in the author's voice, matching the channel's format " +
   "(chat → short; email → a little more structure). No preamble, no quotes, no explanation.";
-const brief = ({ notes, ctx, img }) =>
-  HEAD + (img ? IMG_LINE : "") +
-  (ctx ? "\n\nCONVERSATION CONTEXT (what the author is replying to):\n" + ctx : "") +
-  (notes ? "\n\nWHAT THE AUTHOR WANTS TO SAY (rough notes):\n" + notes
-         : "\n\nWHAT THE AUTHOR WANTS TO SAY: no notes given — infer the natural, useful reply from the conversation.") +
-  TAIL;
+const brief = ({ notes, ctx, img }) => {
+  const hasCasey = notes?.includes("Casey Example's");
+  const maskedNotes = notes?.replaceAll("Casey Example's", "[[PERSON_1]]");
+  const maskedContext = ctx?.replaceAll("Alex Example", `[[PERSON_${hasCasey ? 2 : 1}]]`);
+  return HEAD + (img ? IMG_LINE : "") +
+    (ctx ? "\n\nCONVERSATION CONTEXT (what the author is replying to):\n" + maskedContext : "") +
+    (notes ? "\n\nWHAT THE AUTHOR WANTS TO SAY (rough notes):\n" + maskedNotes
+           : "\n\nWHAT THE AUTHOR WANTS TO SAY: no notes given — infer the natural, useful reply from the conversation.") +
+    TAIL + (hasCasey || ctx?.includes("Alex Example") ? "\n\n" + MASK_INSTRUCTION : "");
+};
 const CODEX_FIXED = ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never", "--output-last-message"];
 // drop the random -o path (index 8) so argv can be compared exactly
 const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
@@ -134,7 +141,7 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
 // ---- 1. codex reply: image + notes + context ----------------------------------
 {
   const r = run(NOTES, ["--backend", "codex", "--reply", "--image", PNG, "--context", CTX]);
-  eq("codex reply: exit 0 + output + via", [r.code, r.out, r.err.trim()], [0, "CODEX-OUT", "via:codex"]);
+  eq("codex reply: exit 0 + output + via", [r.code, r.out, r.err.trim()], [0, "CODEX-OUT", "context:masked\nvia:codex"]);
   eq("codex reply: exactly one codex call, nothing else", calls(), [1, 0, 0, 0]);
   eq("codex reply: argv = fixed flags, model/effort, --image=<abs path>, prompt last",
     stripOut(codexArgv()[0]),
@@ -193,12 +200,13 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
   eq("plain rewrite: argv unchanged (no --image, draft block)",
     stripOut(codexArgv()[0]),
     [...CODEX_FIXED, "--model", "gpt-6-astra", "-c", 'model_reasoning_effort="low"',
-     SYS + "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + NOTES]);
+     SYS + "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + MASKED_NOTES +
+       "\n\n" + MASK_INSTRUCTION]);
 }
 // ---- 7. claude reply ------------------------------------------------------------------
 {
   let r = run(NOTES, ["--backend", "claude", "--reply", "--image", PNG, "--context", CTX]);
-  eq("claude reply: exit 0 + via", [r.code, r.out, r.err.trim()], [0, "CLAUDE-OUT", "via:claude"]);
+  eq("claude reply: exit 0 + via", [r.code, r.out, r.err.trim()], [0, "CLAUDE-OUT", "context:masked\nvia:claude"]);
   eq("claude reply: -p prompt + path list + --allowedTools Read",
     claudeArgv()[0],
     ["-p", SYS + "\n\n" + brief({ notes: NOTES, ctx: CTX, img: true }) +
@@ -209,12 +217,13 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
     claudeArgv()[0], ["-p", SYS + "\n\n" + brief({ notes: NOTES, ctx: CTX })]);
   r = run(NOTES, ["--backend", "claude"]);
   eq("claude plain rewrite: unchanged argv",
-    claudeArgv()[0], ["-p", SYS + "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + NOTES]);
+    claudeArgv()[0], ["-p", SYS + "\n\nDRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" +
+      MASKED_NOTES + "\n\n" + MASK_INSTRUCTION]);
 }
 // ---- 8. kimi reply (OpenAI vision parts) ------------------------------------------------
 {
   let r = run(NOTES, ["--backend", "kimi", "--reply", "--image", PNG, "--image", JPG, "--context", CTX]);
-  eq("kimi reply: exit 0 + via", [r.code, r.err.trim()], [0, "via:kimi"]);
+  eq("kimi reply: exit 0 + via", [r.code, r.err.trim()], [0, "context:masked\nvia:kimi"]);
   const b = kimiBodies()[0];
   eq("kimi reply: system prompt untouched", b.messages[0], { role: "system", content: SYS });
   eq("kimi reply: user content = text part + image_url data URLs (png, jpeg mime, exact base64)",
@@ -230,13 +239,17 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
     kimiBodies()[0].messages[1], { role: "user", content: brief({ notes: NOTES, ctx: CTX }) });
   eq("kimi reply stream: streamed output", [r.code, r.out], [0, "KIMI: " + brief({ notes: NOTES, ctx: CTX }).slice(0, 40)]);
   r = run(NOTES, ["--backend", "kimi"]);
-  eq("kimi plain rewrite: user content is just the draft (regression)",
-    kimiBodies()[0].messages[1], { role: "user", content: NOTES });
+  eq("kimi plain rewrite with masked names gets a framed draft and placeholder instruction",
+    kimiBodies()[0].messages[1], {
+      role: "user",
+      content: "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" +
+        MASKED_NOTES + "\n\n" + MASK_INSTRUCTION,
+    });
 }
 // ---- 9. ollama reply (images: raw base64) -----------------------------------------------
 {
   let r = run(NOTES, ["--backend", "ollama", "--reply", "--image", PNG]);
-  eq("ollama reply: exit 0 + via", [r.code, r.err.trim()], [0, "via:ollama"]);
+  eq("ollama reply: exit 0 + via", [r.code, r.err.trim()], [0, "context:masked\nvia:ollama"]);
   eq("ollama reply: user message = brief + images[base64]",
     ollamaBodies()[0].messages[1],
     { role: "user", content: brief({ notes: NOTES, img: true }), images: [PNG_BYTES.toString("base64")] });
@@ -244,7 +257,11 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
     [ollamaBodies()[0].messages[0].role, ollamaBodies()[0].messages[0].content.startsWith("You are drafting a message on behalf of the author")], ["system", true]);
   r = run(NOTES, ["--backend", "ollama"]);
   eq("ollama plain rewrite: no images key, content = framed draft",
-    ollamaBodies()[0].messages[1], { role: "user", content: "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" + NOTES });
+    ollamaBodies()[0].messages[1], {
+      role: "user",
+      content: "DRAFT TO REWRITE (re-voice this exact draft; output only the rewritten draft):\n" +
+        MASKED_NOTES + "\n\n" + MASK_INSTRUCTION,
+    });
 }
 // ---- 10. history logging in reply mode --------------------------------------------------
 {
@@ -265,7 +282,7 @@ const stripOut = (a) => a.slice(0, 8).concat(a.slice(9));
 // ---- 11. chain: claude fails -> codex still gets the image; explicit codex fail = no fallthrough
 {
   let r = run(NOTES, ["--reply", "--image", PNG], { FAKE_CLAUDE_MODE: "fail", REWRITE_BACKEND: "claude,codex" });
-  eq("auto chain reply: claude failed, codex answered", [r.code, r.out, r.err.trim()], [0, "CODEX-OUT", "via:codex"]);
+  eq("auto chain reply: claude failed, codex answered", [r.code, r.out, r.err.trim()], [0, "CODEX-OUT", "context:masked\nvia:codex"]);
   eq("auto chain reply: codex call still carries --image", codexArgv()[0].slice(13, 14), [`--image=${PNG}`]);
   eq("auto chain reply: claude was tried first with the image", claudeArgv()[0].slice(2), ["--allowedTools", "Read"]);
   r = run(NOTES, ["--backend", "codex", "--reply", "--image", PNG], { FAKE_CODEX_MODE: "fail" });

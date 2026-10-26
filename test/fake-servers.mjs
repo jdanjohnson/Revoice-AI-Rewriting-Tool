@@ -57,7 +57,8 @@ createServer((req, res) => {
 }).listen(4713);
 
 // fake OpenAI (4714): logs headers+body, answers non-stream + SSE stream. Tests control it via
-// ${T}/openai.reply (verbatim content) and ${T}/openai.status (HTTP status to fail with).
+// ${T}/openai.reply (verbatim content), ${T}/openai.split-at (optional SSE split index),
+// and ${T}/openai.status (HTTP status to fail with).
 createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
@@ -84,12 +85,14 @@ createServer((req, res) => {
     try { content = fs.readFileSync(`${T}/openai.reply`, "utf8"); } catch {}
     if (parsed.stream) {
       res.setHeader("Content-Type", "text/event-stream");
-      const half = Math.ceil(content.length / 2);
+      let splitAt = Math.ceil(content.length / 2);
+      try { splitAt = Number(fs.readFileSync(`${T}/openai.split-at`, "utf8")); } catch {}
+      splitAt = Math.max(0, Math.min(content.length, splitAt));
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant" } }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(0, half) } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(0, splitAt) } }] })}\n\n`);
       // ${T}/openai.truncate: orderly close after the first delta, no [DONE]
       if (fs.existsSync(`${T}/openai.truncate`)) return res.end();
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(half) } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(splitAt) } }] })}\n\n`);
       res.end("data: [DONE]\n\n");
     } else {
       res.setHeader("Content-Type", "application/json");

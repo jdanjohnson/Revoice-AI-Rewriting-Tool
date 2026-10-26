@@ -70,7 +70,7 @@ process.on("exit", () => server.kill());
 process.env.HOME = HOME;
 process.env.REVOICE_ZO_TOKEN = "test-token";
 process.env.REVOICE_ZO_URL = "http://127.0.0.1:4715/sse";
-const { zoCall, computeFreeSlots } = await import("../bin/revoice.js");
+const { zoCall, computeFreeSlots, createMasker } = await import("../bin/revoice.js");
 
 const baseEnv = {
   PATH: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
@@ -89,6 +89,8 @@ const baseEnv = {
   REVOICE_TZ: "America/New_York",
   REVOICE_WORK_HOURS: "9-18",
   REVOICE_NOW: "2026-10-26T08:05:00-04:00",
+  OPENAI_API_URL: "http://127.0.0.1:4714/v1",
+  OPENAI_API_KEY: "fake-openai-key",
 };
 fs.writeFileSync(baseEnv.REWRITE_PROMPT_FILE, "TEST PROMPT: rewrite.");
 fs.mkdirSync(baseEnv.REWRITE_SKILLS_DIR);
@@ -110,6 +112,7 @@ function lines(file) {
 function run(input, args, extra = {}) {
   fs.rmSync(FAKE_CODEX_LOG, { force: true });
   fs.rmSync(path.join(T, "zo.log"), { force: true });
+  fs.rmSync(path.join(T, "openai.log"), { force: true });
   const result = spawnSync(process.execPath, [CLI, ...args], {
     input,
     env: { ...baseEnv, ...extra },
@@ -118,9 +121,19 @@ function run(input, args, extra = {}) {
   });
   return { code: result.status, out: result.stdout, err: result.stderr };
 }
+function runOpenAI(input, args, extra = {}, { reply, splitAt } = {}) {
+  if (reply === undefined) fs.rmSync(path.join(T, "openai.reply"), { force: true });
+  else fs.writeFileSync(path.join(T, "openai.reply"), reply);
+  if (splitAt === undefined) fs.rmSync(path.join(T, "openai.split-at"), { force: true });
+  else fs.writeFileSync(path.join(T, "openai.split-at"), String(splitAt));
+  return run(input, args, extra);
+}
 function prompt() {
   const entry = JSON.parse(lines(FAKE_CODEX_LOG).at(-1));
   return entry.argv.at(-1);
+}
+function openaiBody() {
+  return JSON.parse(lines(path.join(T, "openai.log")).at(-1)).body;
 }
 const emptyHome = (includeLocal = false) => {
   fs.rmSync(CONTEXT, { recursive: true, force: true });
@@ -130,6 +143,19 @@ const emptyHome = (includeLocal = false) => {
     fs.writeFileSync(path.join(CONTEXT, "notes.md"), "Local durable note.\n");
   }
 };
+
+// The masker handles identifiers across all configured text classes and restores them exactly.
+{
+  const sample = "Alex Example <alex.example@example.com>, call +1 (305) 555-0100, re Project Falcon";
+  const masker = createMasker([sample], { privateTerms: ["Project Falcon"] });
+  const masked = masker.mask(sample);
+  check("masker replaces email, phone, full name, first name, and private term",
+    ["Alex Example", "Alex", "alex.example@example.com", "+1 (305) 555-0100", "Project Falcon"]
+      .every((value) => !masked.includes(value)), masked);
+  eq("masker restores exact input", masker.unmask(masked), sample);
+  check("masker replaces a standalone first name", masker.mask("Alex") !== "Alex", masker.mask("Alex"));
+  check("masker reports matched private values", masker.count > 0, String(masker.count));
+}
 
 // Invalid tools are rejected before initialize can reach the fake endpoint.
 {
@@ -208,7 +234,8 @@ const emptyHome = (includeLocal = false) => {
     { REVOICE_CALENDARS: "offline@example.com,owner@example.com" });
   eq("one failed calendar does not fail reply", [result.code, result.out], [0, "FAKE-OUTPUT"]);
   check("failed calendar withholds all availability slots",
-    prompt().includes("Calendar availability unavailable (could not read: offline@example.com); do not propose specific times.") &&
+    prompt().includes("Calendar availability unavailable (could not read: [[EMAIL_1]]); do not propose specific times.") &&
+      !prompt().includes("offline@example.com") &&
       !prompt().includes("Mon Oct 26,") && !prompt().includes("Tue Oct 27,"), prompt());
   check("failed calendar suppresses proposal instruction",
     !prompt().includes("propose 2–3 concrete times"), prompt());
@@ -230,7 +257,8 @@ const emptyHome = (includeLocal = false) => {
   const result = run("", ["--backend", "codex", "--reply", "--image", FAKE_IMAGE],
     { GOLDFISH_MCP: FAKE_GOLDFISH, REVOICE_CALENDARS: "" });
   eq("reply with Goldfish context succeeds", [result.code, result.out], [0, "FAKE-OUTPUT"]);
-  check("Goldfish response becomes context", prompt().includes("Alex Example appeared in recent screen activity."), prompt());
+  check("Goldfish response becomes masked context",
+    prompt().includes("[[PERSON_1]] appeared in recent screen activity.") && !prompt().includes("Alex Example"), prompt());
   check("Goldfish name triggers contact lookup", prompt().includes("ALEX DOSSIER"), prompt());
 }
 
@@ -294,6 +322,7 @@ const emptyHome = (includeLocal = false) => {
 // Remember/status are local operations; status must not reveal account values.
 {
   emptyHome();
+  fs.writeFileSync(path.join(CONTEXT, "private-terms.txt"), "Project Falcon\n");
   let result = run("", ["--remember", "Use concise explanations."], { REVOICE_ZO_TOKEN: "" });
   eq("--remember confirms completion", [result.code, result.out.trim()], [0, "remembered"]);
   check("--remember appends a dated note", /^- \d{4}-\d{2}-\d{2} Use concise explanations\.\n$/.test(
@@ -303,7 +332,11 @@ const emptyHome = (includeLocal = false) => {
   check("--context-status reports local file state", result.out.includes("notes.md:") && result.out.includes("about-me.md: missing"));
   check("--context-status reports token and calendar configuration", result.out.includes("zoey: token not set") &&
     result.out.includes("calendars: 1 accounts configured"), result.out);
+  check("--context-status reports enabled masking and configured private terms",
+    result.out.includes("masking: on (1 private terms)"), result.out);
   check("--context-status doesn't display configured calendar address", !result.out.includes("owner@example.com"), result.out);
+  result = run("", ["--doctor"], { REVOICE_ZO_TOKEN: "", REVOICE_MASK: "off" });
+  check("--doctor reports masking off", result.out.includes("masking: off"), result.out);
 }
 
 // Exercise deterministic weekday slots directly, including the next half-hour boundary.
@@ -317,6 +350,55 @@ const emptyHome = (includeLocal = false) => {
   check("free slot math returns human-readable weekday availability",
     slots.length > 0 && slots[0].startsWith("Mon Oct 26,"), JSON.stringify(slots));
   check("free slot starts on a half-hour boundary", !slots[0]?.includes("9:00 AM"), JSON.stringify(slots));
+}
+
+// Backend requests contain placeholders, and local output/history restore the originals.
+{
+  const sample = "Alex Example <alex.example@example.com>, call +1 (305) 555-0100, re Project Falcon";
+  const rawValues = [
+    "Alex Example",
+    "Alex",
+    "alex.example@example.com",
+    "+1 (305) 555-0100",
+    "Project Falcon",
+  ];
+  emptyHome();
+  fs.writeFileSync(path.join(CONTEXT, "private-terms.txt"), "Project Falcon\n");
+  fs.rmSync(path.join(HOME, ".revoice", "history.jsonl"), { force: true });
+  let result = runOpenAI(sample, ["--backend", "openai", "--log-history"], {}, {
+    reply: "[[PERSON_1]] <[[EMAIL_1]]>",
+  });
+  const body = openaiBody();
+  const request = JSON.stringify(body);
+  check("OpenAI request masks all raw identifiers", rawValues.every((value) => !request.includes(value)), request);
+  check("OpenAI request includes placeholders and their handling instruction",
+    request.includes("[[PERSON_1]]") && request.includes("[[EMAIL_1]]") &&
+      request.includes("Placeholders like [[PERSON_1]] stand for real values"), request);
+  eq("OpenAI output restores name and email", [result.code, result.out], [0, "Alex Example <alex.example@example.com>"]);
+  check("masking is visible in stderr", result.err.includes("context:masked"), result.err);
+  const history = JSON.parse(fs.readFileSync(path.join(HOME, ".revoice", "history.jsonl"), "utf8").trim());
+  eq("history stores restored original and output", [history.original, history.rewrite], [
+    sample,
+    "Alex Example <alex.example@example.com>",
+  ]);
+  console.log(`MASKED_REQUEST_BODY ${JSON.stringify(body)}`);
+
+  emptyHome();
+  result = runOpenAI("Alex Example", ["--backend", "openai", "--stream"], {}, {
+    reply: "[[PERSON_1]]",
+    splitAt: "[[PERS".length,
+  });
+  eq("streaming restores a placeholder split across chunks",
+    [result.code, result.out, result.err.trim()], [0, "Alex Example", "context:masked\nvia:openai"]);
+
+  emptyHome();
+  fs.writeFileSync(path.join(CONTEXT, "private-terms.txt"), "Project Falcon\n");
+  result = runOpenAI(sample, ["--backend", "openai"], { REVOICE_MASK: "off" }, { reply: "Unmasked response." });
+  const unmaskedRequest = JSON.stringify(openaiBody());
+  check("REVOICE_MASK=off sends raw identifiers",
+    rawValues.every((value) => unmaskedRequest.includes(value)), unmaskedRequest);
+  check("REVOICE_MASK=off omits masking instructions and marker",
+    !unmaskedRequest.includes("[[PERSON_1]]") && !result.err.includes("context:masked"), result.err);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

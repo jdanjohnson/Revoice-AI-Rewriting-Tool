@@ -66,6 +66,8 @@ Revoice can use local files in `~/.revoice/context/`:
 
 When a Zo token is configured, reply, ask, and prompt modes can also look up up to three matching contact cards and read calendar free/busy information when a meeting is being discussed. Calendar access is read-only. Optional Goldfish screen activity is also read-only and best-effort. The context is sent to the configured rewrite backend as part of the user message; leave those features unconfigured or set `REVOICE_CONTEXT=off` to disable context gathering.
 
+By default, Revoice masks detected email addresses, phone numbers, full names, first names, and whole-word terms listed in `~/.revoice/context/private-terms.txt` before sending text and gathered context to a backend; placeholders are restored locally in the preview and history. Set `REVOICE_MASK=off` to opt out. Screenshot images and the system voice prompt (including voice samples) are not masked and may still contain identifying information.
+
 Example setup for `~/.revoice/env` (replace placeholders with your own values):
 
 ```sh

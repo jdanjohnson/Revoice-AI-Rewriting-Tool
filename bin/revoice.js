@@ -654,13 +654,120 @@ function extractPeople(text) {
     seen.add(slug);
     candidates.push({ name, slug });
   };
-  for (const match of text.matchAll(/\b([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?)\s+([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?)\b/g))
+  for (const match of text.matchAll(PERSON_NAME_PATTERN))
     add([match[1], match[2]]);
   for (const match of text.matchAll(/\b([A-Z0-9._+-]+)@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi)) {
     const parts = match[1].split(/[._-]+/).filter(Boolean);
     if (parts.length >= 2) add(parts);
   }
   return candidates.slice(0, 4);
+}
+
+const PERSON_NAME_PATTERN = /\b([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?)\s+([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?)\b/g;
+const CALENDAR_DATE_LABEL = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$/;
+const MASK_PRIORITY = { EMAIL: 0, PHONE: 1, TERM: 2, PERSON: 3, NAME: 4 };
+
+function readPrivateTerms() {
+  try {
+    const seen = new Set();
+    return fs.readFileSync(path.join(CONTEXT_DIR, "private-terms.txt"), "utf8")
+      .split(/\r?\n/)
+      .map((term) => term.trim())
+      .filter((term) => {
+        if (!term || seen.has(term.toLowerCase())) return false;
+        seen.add(term.toLowerCase());
+        return true;
+      });
+  } catch {
+    return [];
+  }
+}
+
+function createMasker(texts, { privateTerms = [] } = {}) {
+  const sources = (Array.isArray(texts) ? texts : [texts])
+    .filter((text) => text !== null && text !== undefined)
+    .map(String);
+  const tokensByValue = new Map();
+  const valuesByToken = new Map();
+  const counters = new Map();
+  const usedTokens = new Set();
+  const entries = [];
+  const entryKeys = new Set();
+
+  const register = (value, type) => {
+    const priority = MASK_PRIORITY[type];
+    const existing = tokensByValue.get(value);
+    if (existing && existing.priority <= priority) return existing.token;
+    const index = (counters.get(type) || 0) + 1;
+    counters.set(type, index);
+    const token = `[[${type}_${index}]]`;
+    tokensByValue.set(value, { token, priority });
+    valuesByToken.set(token, value);
+    return token;
+  };
+  const addEntry = (value, type, privateTerm = false) => {
+    register(value, type);
+    const key = `${type}\0${privateTerm ? value.toLowerCase() : value}`;
+    if (!entryKeys.has(key)) {
+      entryKeys.add(key);
+      entries.push({ value, type, privateTerm });
+    }
+  };
+
+  for (const source of sources) {
+    for (const match of source.matchAll(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g))
+      addEntry(match[0], "EMAIL");
+    for (const match of source.matchAll(/\+?\d[\d\s().-]{7,}\d/g))
+      if ((match[0].match(/\d/g) || []).length >= 10) addEntry(match[0], "PHONE");
+  }
+
+  const seenTerms = new Set();
+  const terms = Array.isArray(privateTerms)
+    ? privateTerms
+    : privateTerms ? String(privateTerms).split(/\r?\n/) : [];
+  for (const term of terms) {
+    const value = String(term).trim();
+    const key = value.toLowerCase();
+    if (!value || seenTerms.has(key)) continue;
+    seenTerms.add(key);
+    addEntry(value, "TERM", true);
+  }
+
+  for (const source of sources) {
+    for (const match of source.matchAll(PERSON_NAME_PATTERN)) {
+      if (CALENDAR_DATE_LABEL.test(match[0])) continue;
+      addEntry(match[0], "PERSON");
+      addEntry(match[1], "NAME");
+    }
+  }
+
+  entries.sort((a, b) =>
+    b.value.length - a.value.length ||
+    MASK_PRIORITY[a.type] - MASK_PRIORITY[b.type]
+  );
+  const wordPattern = (value, flags = "g") =>
+    new RegExp(`(?<![A-Za-z0-9_])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`, flags);
+
+  function mask(input) {
+    let result = String(input ?? "");
+    for (const entry of entries) {
+      const pattern = wordPattern(entry.value, entry.privateTerm ? "gi" : "g");
+      result = result.replace(pattern, (match) => {
+        const token = register(match, entry.type);
+        usedTokens.add(token);
+        return token;
+      });
+    }
+    return result;
+  }
+
+  function unmask(input) {
+    return String(input ?? "").replace(/\[\[?(EMAIL|PHONE|PERSON|NAME|TERM)_(\d+)\]\]?/g, (match, type, index) =>
+      valuesByToken.get(`[[${type}_${index}]]`) ?? match
+    );
+  }
+
+  return { mask, unmask, get count() { return usedTokens.size; } };
 }
 
 function dateParts(epoch, timeZone) {
@@ -1108,6 +1215,9 @@ async function contextStatus() {
   lines.push(`zoey: token ${ZO_TOKEN ? "set" : "not set"}; ${reachable}`);
   lines.push(`calendars: ${CALENDAR_ACCOUNTS.length} accounts configured`);
   lines.push(`goldfish: ${GOLDFISH_PATH && fs.existsSync(GOLDFISH_PATH) ? GOLDFISH_PATH : "not found"}`);
+  lines.push(process.env.REVOICE_MASK === "off"
+    ? "masking: off"
+    : `masking: on (${readPrivateTerms().length} private terms)`);
   return lines;
 }
 
@@ -1158,10 +1268,13 @@ function buildTaskMessage(text, task) {
   if (task.mode !== "reply" && (task.app || task.windowTitle))
     message += `\n\nON SCREEN: ${[task.app, task.windowTitle].filter(Boolean).join(" — ")}`;
   const personal = personalContextMessage(task.contextBlocks || []);
-  return personal ? `${message}\n\n${personal}` : message;
+  if (personal) message += `\n\n${personal}`;
+  if (task.maskCount > 0)
+    message += "\n\nPlaceholders like [[PERSON_1]] stand for real values; copy them exactly where needed and never guess what they are.";
+  return message;
 }
 function buildUserMessage(text, task) {
-  return task.mode !== "rewrite" || task.contextBlocks?.length || task.app || task.windowTitle
+  return task.mode !== "rewrite" || task.contextBlocks?.length || task.app || task.windowTitle || task.maskCount > 0
     ? buildTaskMessage(text, task)
     : text;
 }
@@ -1820,7 +1933,7 @@ async function main() {
     process.exit(1);
   }
   const mode = args.reply ? "reply" : args.prompt ? "prompt" : args.ask ? "ask" : "rewrite";
-  const text = (await readStdin()).trim();
+  let text = (await readStdin()).trim();
   const task = {
     mode,
     context: (args.context || "").trim(),
@@ -1828,6 +1941,7 @@ async function main() {
     app: args.app,
     windowTitle: args.windowTitle,
   };
+  const originalForHistory = text || task.context;
   if (mode !== "reply" && (task.context || task.images.length)) {
     console.error("revoice: --context/--image only apply with --reply");
     process.exit(1);
@@ -1852,20 +1966,55 @@ async function main() {
     process.exit(1);
   }
 
+  let unmaskOutput = (value) => value;
+  task.maskCount = 0;
+  if (process.env.REVOICE_MASK !== "off") {
+    const masker = createMasker([
+      text,
+      task.context,
+      task.windowTitle,
+      task.app,
+      ...task.contextBlocks.flatMap((block) => [block.body, block.title]),
+    ], { privateTerms: readPrivateTerms() });
+    text = masker.mask(text);
+    task.context = masker.mask(task.context);
+    task.windowTitle = masker.mask(task.windowTitle);
+    task.app = masker.mask(task.app);
+    for (const block of task.contextBlocks) {
+      block.body = masker.mask(block.body);
+      block.title = masker.mask(block.title);
+    }
+    unmaskOutput = (value) => masker.unmask(value);
+    task.maskCount = masker.count;
+    if (task.maskCount > 0) console.error("context:masked");
+  }
+
   const deadline = Date.now() + REWRITE_TIMEOUT_MS;
   const errors = [];
   // In --stream mode Kimi chunks are written to stdout as they arrive; emit()
   // then only needs to flush whatever wasn't already streamed. Ollama is
   // buffered so its output can be cleaned/rejected before any of it is shown.
   let streamedChars = 0;
+  let pendingPh = "";
   const flush = (s) => {
     streamedChars += s.length;
-    process.stdout.write(s);
+    let released = pendingPh + s;
+    pendingPh = "";
+    let open = released.lastIndexOf("[");
+    if (open >= 0 && open > released.lastIndexOf("]")) {
+      while (open > 0 && released[open - 1] === "[") open--;
+      const holdback = released.slice(open);
+      if (holdback.length <= 24) {
+        pendingPh = holdback;
+        released = released.slice(0, open);
+      }
+    }
+    process.stdout.write(unmaskOutput(released));
   };
   // Streamed text is forwarded line by line; a line that starts like `FLAGS:` (or could still
   // become one) is held back so the flags never reach stdout/the HUD.
   let held = "", lineStart = true, flagsSeen = false;
-  const resetStream = () => { held = ""; lineStart = true; flagsSeen = false; };
+  const resetStream = () => { held = ""; lineStart = true; flagsSeen = false; pendingPh = ""; };
   const flagsOff = draftHasFlagsLine(text);
   const onChunk = args.stream
     ? (delta) => {
@@ -1889,13 +2038,14 @@ async function main() {
       }
     : null;
   const emit = (raw, via) => {
-    const { rewrite: out, flags } = splitFlags(raw, text);
+    const { rewrite: rawOut, flags } = splitFlags(raw, text);
+    const out = unmaskOutput(rawOut);
     if (via) console.error(`via:${via}`);
     for (const f of flags) console.error(`flag:${f}`);
     if (args.logHistory) {
       appendHistory({
         ts: new Date().toISOString(),
-        original: (text || task.context).slice(0, 2000),
+        original: originalForHistory.slice(0, 2000),
         rewrite: out.slice(0, 2000),
         style: args.style || "",
         instruction: args.instruction || "",
@@ -1904,8 +2054,9 @@ async function main() {
         via,
       });
     }
-    const rest = out.length > streamedChars ? out.slice(streamedChars) : "";
-    process.stdout.write(rest, () => process.exit(0));
+    const rest = pendingPh + (rawOut.length > streamedChars ? rawOut.slice(streamedChars) : "");
+    pendingPh = "";
+    process.stdout.write(unmaskOutput(rest), () => process.exit(0));
   };
   const remaining = (min) => Math.max(deadline - Date.now(), min);
   const cliBudget = (envName) => {
@@ -1967,4 +2118,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   });
 }
 
-export { zoCall, gatherContext, computeFreeSlots, parseBusyIntervals, buildTaskMessage };
+export { zoCall, gatherContext, computeFreeSlots, parseBusyIntervals, buildTaskMessage, createMasker };
