@@ -73,7 +73,7 @@ process.env.REVOICE_ZO_URL = "http://127.0.0.1:4715/sse";
 const { zoCall, computeFreeSlots } = await import("../bin/revoice.js");
 
 const baseEnv = {
-  PATH: "/usr/bin:/bin",
+  PATH: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
   HOME,
   CODEX_BIN: FAKE_CODEX,
   FAKE_CODEX_LOG,
