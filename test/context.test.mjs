@@ -23,6 +23,36 @@ fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ argv }) + "\\n");
 const i = argv.indexOf("--output-last-message");
 fs.writeFileSync(argv[i + 1], "FAKE-OUTPUT");
 `, { mode: 0o755 });
+const FAKE_IMAGE = path.join(T, "screenshot.png");
+fs.writeFileSync(FAKE_IMAGE, "fake screenshot");
+const FAKE_GOLDFISH = path.join(T, "goldfish-mcp");
+fs.writeFileSync(FAKE_GOLDFISH, `#!/usr/bin/env node
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split(/\\r?\\n/);
+  buffer = lines.pop();
+  for (const line of lines) {
+    if (!line) continue;
+    const message = JSON.parse(line);
+    let result;
+    if (message.method === "initialize") {
+      result = { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fake-goldfish", version: "1.0.0" } };
+    } else if (message.method === "tools/list") {
+      result = { tools: [{ name: "search_activity", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }] };
+    } else if (message.method === "tools/call") {
+      result = { content: [{ type: "text", text: "Alex Example appeared in recent screen activity." }] };
+    } else {
+      continue;
+    }
+    if (message.id !== undefined)
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+  }
+});
+`, { mode: 0o755 });
+const FAKE_GOLDFISH_EXIT = path.join(T, "goldfish-exits");
+fs.writeFileSync(FAKE_GOLDFISH_EXIT, "#!/usr/bin/env node\nprocess.exit(0);\n", { mode: 0o755 });
 
 const server = spawn(process.execPath, [path.join(HERE, "fake-servers.mjs"), T], {
   stdio: ["ignore", "pipe", "inherit"],
@@ -153,6 +183,8 @@ const emptyHome = (includeLocal = false) => {
   ]) check(`reply context includes ${expected}`, assembled.includes(expected), assembled);
   check("availability does not propose a time inside a busy interval",
     !assembled.includes("9:00 AM–10:00 AM") && !assembled.includes("2:00 PM–5:00 PM"), assembled);
+  check("complete calendar availability enables the proposal instruction",
+    assembled.includes("propose 2–3 concrete times from MY REAL AVAILABILITY"), assembled);
   check("reply includes no-notes instruction",
     assembled.includes("no notes given — infer the natural, useful reply"), assembled);
   check("reply context sources are tagged", [
@@ -175,9 +207,54 @@ const emptyHome = (includeLocal = false) => {
   const result = run("ok", ["--backend", "codex", "--reply", "--context", "Can we schedule a call?"],
     { REVOICE_CALENDARS: "offline@example.com,owner@example.com" });
   eq("one failed calendar does not fail reply", [result.code, result.out], [0, "FAKE-OUTPUT"]);
-  check("calendar failure warning appears in prompt",
-    prompt().includes("availability may be incomplete: offline@example.com unreachable"), prompt());
+  check("failed calendar withholds all availability slots",
+    prompt().includes("Calendar availability unavailable (could not read: offline@example.com); do not propose specific times.") &&
+      !prompt().includes("Mon Oct 26,") && !prompt().includes("Tue Oct 27,"), prompt());
+  check("failed calendar suppresses proposal instruction",
+    !prompt().includes("propose 2–3 concrete times"), prompt());
   fs.rmSync(path.join(T, "zo.fail-account"), { force: true });
+}
+
+// A screenshot-only reply gets calendar context even without meeting keywords in the text.
+{
+  emptyHome();
+  const result = run("", ["--backend", "codex", "--reply", "--image", FAKE_IMAGE]);
+  eq("screenshot-only reply succeeds", [result.code, result.out], [0, "FAKE-OUTPUT"]);
+  check("screenshot-only reply gathers availability",
+    prompt().includes("MY REAL AVAILABILITY") && prompt().includes("Mon Oct 26,"), prompt());
+}
+
+// Goldfish activity is queried before contacts, so on-screen names can resolve to contact cards.
+{
+  emptyHome();
+  const result = run("", ["--backend", "codex", "--reply", "--image", FAKE_IMAGE],
+    { GOLDFISH_MCP: FAKE_GOLDFISH, REVOICE_CALENDARS: "" });
+  eq("reply with Goldfish context succeeds", [result.code, result.out], [0, "FAKE-OUTPUT"]);
+  check("Goldfish response becomes context", prompt().includes("Alex Example appeared in recent screen activity."), prompt());
+  check("Goldfish name triggers contact lookup", prompt().includes("ALEX DOSSIER"), prompt());
+}
+
+// An early Goldfish exit is a warning, not a failed draft.
+{
+  emptyHome();
+  const result = run("A short reply.", ["--backend", "codex", "--reply"],
+    { GOLDFISH_MCP: FAKE_GOLDFISH_EXIT, REVOICE_CALENDARS: "" });
+  eq("early Goldfish exit does not fail reply", [result.code, result.out], [0, "FAKE-OUTPUT"]);
+  check("early Goldfish exit is logged as skipped", result.err.includes("context goldfish skipped"), result.err);
+}
+
+// A fully booked seven-day window must not leak next Monday's slots.
+{
+  const now = new Date("2026-10-26T08:05:00-04:00").getTime();
+  const until = now + 7 * 86400000;
+  const slots = computeFreeSlots({
+    now,
+    until,
+    busy: [[now, until]],
+    timeZone: "America/New_York",
+    workHours: "9-18",
+  });
+  eq("fully busy 7-day window has no day-8 slot", slots, []);
 }
 
 // Plain rewrite keeps local context but never contacts Zo; context-off disables both.

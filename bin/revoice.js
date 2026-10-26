@@ -735,7 +735,13 @@ function formatAvailabilityTime(epoch, timeZone) {
   };
 }
 
-function computeFreeSlots({ now, busy = [], workHours = CONTEXT_WORK_HOURS, timeZone = CONTEXT_TZ }) {
+function computeFreeSlots({
+  now,
+  until = now + 7 * 86400000,
+  busy = [],
+  workHours = CONTEXT_WORK_HOURS,
+  timeZone = CONTEXT_TZ,
+}) {
   const hours = workHours.match(/^(\d{1,2})-(\d{1,2})$/);
   if (!hours) throw new Error("REVOICE_WORK_HOURS must use H-H format");
   const startHour = Math.max(0, Math.min(23, Number(hours[1])));
@@ -752,6 +758,8 @@ function computeFreeSlots({ now, busy = [], workHours = CONTEXT_WORK_HOURS, time
     const year = day.getUTCFullYear(), month = day.getUTCMonth() + 1, date = day.getUTCDate();
     const morning = zonedEpoch(year, month, date, startHour, 0, timeZone);
     const evening = zonedEpoch(year, month, date, endHour === 24 ? 0 : endHour, 0, timeZone) + (endHour === 24 ? 86400000 : 0);
+    if (morning >= until) break;
+    const dayEnd = Math.min(evening, until);
     const dayName = dateParts(morning, timeZone).weekday;
     if (dayName === "Sat" || dayName === "Sun") continue;
     let cursor = morning;
@@ -761,13 +769,14 @@ function computeFreeSlots({ now, busy = [], workHours = CONTEXT_WORK_HOURS, time
         : zonedEpoch(year, month, date, Math.floor(nextBoundary / 60), nextBoundary % 60, timeZone);
       cursor = Math.max(cursor, rounded);
     }
+    if (cursor >= dayEnd) continue;
     for (const [busyStart, busyEnd] of mergedBusy) {
-      if (busyEnd <= cursor || busyStart >= evening) continue;
-      if (busyStart - cursor >= 30 * 60000) slots.push([cursor, Math.min(busyStart, evening)]);
+      if (busyEnd <= cursor || busyStart >= dayEnd) continue;
+      if (busyStart - cursor >= 30 * 60000) slots.push([cursor, Math.min(busyStart, dayEnd)]);
       cursor = Math.max(cursor, busyEnd);
-      if (cursor >= evening) break;
+      if (cursor >= dayEnd) break;
     }
-    if (evening - cursor >= 30 * 60000) slots.push([cursor, evening]);
+    if (dayEnd - cursor >= 30 * 60000) slots.push([cursor, dayEnd]);
     if (slots.length >= 8) break;
   }
   return slots.slice(0, 8).map(([start, end]) => {
@@ -805,11 +814,12 @@ async function gatherAvailability(text, windowStart) {
       }
     })
   );
-  const merged = mergeIntervals(results.flatMap((result) => result.intervals));
-  const slots = computeFreeSlots({ now: windowStart.getTime(), busy: merged });
-  const lines = slots.length ? slots : ["No free 30-minute slots found in the next seven days."];
   const failures = results.filter((result) => result.failed).map((result) => result.account);
-  if (failures.length) lines.push(`availability may be incomplete: ${failures.join(", ")} unreachable`);
+  if (failures.length)
+    return `Calendar availability unavailable (could not read: ${failures.join(", ")}); do not propose specific times.`;
+  const merged = mergeIntervals(results.flatMap((result) => result.intervals));
+  const slots = computeFreeSlots({ now: windowStart.getTime(), until: windowEnd.getTime(), busy: merged });
+  const lines = slots.length ? slots : ["No free 30-minute slots found in the next seven days."];
   return lines.join("\n");
 }
 
@@ -824,11 +834,33 @@ async function searchGoldfish(query) {
   const child = spawn(GOLDFISH_PATH, [], { stdio: ["pipe", "pipe", "ignore"] });
   const pending = new Map();
   let buffer = "";
+  let timeoutId;
+  let childError;
+  const clearTimeoutId = () => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = undefined;
+  };
+  const rejectPending = (error) => {
+    childError ||= error;
+    for (const [id, entry] of pending) {
+      pending.delete(id);
+      entry.reject(childError);
+    }
+  };
+  const fail = (error) => {
+    clearTimeoutId();
+    rejectPending(error);
+  };
   const request = (method, params = {}) =>
     new Promise((resolve, reject) => {
+      if (childError) return reject(childError);
       const id = ++zoRequestId;
       pending.set(id, { resolve, reject });
-      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      try {
+        child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      } catch (error) {
+        fail(error);
+      }
     });
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
@@ -846,8 +878,22 @@ async function searchGoldfish(query) {
       } catch {}
     }
   });
-  child.on("error", () => {});
-  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Goldfish timed out")), 3000).unref());
+  child.stdin.on("error", fail);
+  child.on("error", fail);
+  const onExit = (code, signal) => {
+    const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+    fail(new Error(`Goldfish exited before responding (${reason})`));
+  };
+  child.on("close", onExit);
+  child.on("exit", onExit);
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = new Error("Goldfish timed out");
+      fail(error);
+      reject(error);
+    }, 3000);
+    timeoutId.unref();
+  });
   try {
     const response = await Promise.race([
       (async () => {
@@ -877,6 +923,7 @@ async function searchGoldfish(query) {
   } catch (error) {
     throw error;
   } finally {
+    clearTimeoutId();
     child.kill("SIGTERM");
   }
 }
@@ -896,7 +943,7 @@ function fitContextBlocks(blocks) {
   return blocks.filter((block) => block.body.trim());
 }
 
-async function gatherContext({ mode, text, context, windowTitle, app }) {
+async function gatherContext({ mode, text, context, windowTitle, app, hasImage = false }) {
   const warnings = [];
   const warn = (source, error) => {
     const reason = String(error?.message || error || "unavailable").replace(/\s+/g, " ").slice(0, 180);
@@ -930,44 +977,68 @@ async function gatherContext({ mode, text, context, windowTitle, app }) {
       );
     }
   }
-  if (ZO_TOKEN) for (const candidate of candidates) {
+  let goldfishJob;
+  if (GOLDFISH_PATH) {
+    remoteLabels.push("goldfish");
+    goldfishJob = (async () => {
+      const body = await searchGoldfish((windowTitle || [context, text].filter(Boolean).join("\n") || "").slice(0, 200));
+      return {
+        source: "goldfish",
+        goldfishText: body,
+        ...(body && { block: { source: "goldfish", title: "RECENT SCREEN ACTIVITY (Goldfish)", body } }),
+      };
+    })();
+    remoteJobs.push(goldfishJob);
+  }
+  if (ZO_TOKEN) {
     remoteLabels.push("contacts");
     remoteJobs.push(
       (async () => {
-        try {
-          const body = await zoCall("read_file", {
-            target_file: `/home/workspace/Records/Contacts/${candidate.slug}.md`,
-          });
-          return body.trim()
-            ? { source: "contacts", block: { source: "contacts", title: `Contact: ${candidate.name}`, body: body.slice(0, 1500) } }
-            : { source: "contacts" };
-        } catch (error) {
-          if (!/not found|does not exist|no such file/i.test(error.message || "")) warn("contacts", error);
-          return { source: "contacts", failed: true };
+        const goldfishResult = goldfishJob ? await goldfishJob.catch(() => null) : null;
+        const contactCandidates = [...candidates];
+        const seenCandidates = new Set(contactCandidates.map((candidate) => candidate.slug));
+        for (const candidate of extractPeople(goldfishResult?.goldfishText || "")) {
+          if (contactCandidates.length >= 4) break;
+          if (seenCandidates.has(candidate.slug)) continue;
+          seenCandidates.add(candidate.slug);
+          contactCandidates.push(candidate);
         }
+        return Promise.all(contactCandidates.map(async (candidate) => {
+          try {
+            const body = await zoCall("read_file", {
+              target_file: `/home/workspace/Records/Contacts/${candidate.slug}.md`,
+            });
+            return body.trim()
+              ? { source: "contacts", block: { source: "contacts", title: `Contact: ${candidate.name}`, body: body.slice(0, 1500) } }
+              : { source: "contacts" };
+          } catch (error) {
+            if (!/not found|does not exist|no such file/i.test(error.message || "")) warn("contacts", error);
+            return { source: "contacts", failed: true };
+          }
+        }));
       })()
     );
   }
-  if (ZO_TOKEN && CALENDAR_ACCOUNTS.length && availabilityIsRelevant(queryText)) {
+  if (ZO_TOKEN && CALENDAR_ACCOUNTS.length &&
+    (availabilityIsRelevant(queryText) || (mode === "reply" && hasImage))) {
     remoteLabels.push("calendar");
     remoteJobs.push(
       (async () => {
         try {
           const body = await gatherAvailability(queryText, now);
-          return { source: "availability", block: { source: "availability", title: "MY REAL AVAILABILITY (from my calendars; only offer these times)", body } };
+          return {
+            source: "availability",
+            block: {
+              source: "availability",
+              title: "MY REAL AVAILABILITY (from my calendars; only offer these times)",
+              body,
+              availabilityComplete: !body.startsWith("Calendar availability unavailable "),
+            },
+          };
         } catch (error) {
           warn("calendar", error);
           return { source: "availability", failed: true };
         }
-      })()
-    );
-  }
-  if (GOLDFISH_PATH) {
-    remoteLabels.push("goldfish");
-    remoteJobs.push(
-      (async () => {
-        const body = await searchGoldfish((windowTitle || [context, text].filter(Boolean).join("\n") || "").slice(0, 200));
-        return body ? { source: "goldfish", block: { source: "goldfish", title: "RECENT SCREEN ACTIVITY (Goldfish)", body } } : { source: "goldfish" };
       })()
     );
   }
@@ -999,7 +1070,7 @@ async function gatherContext({ mode, text, context, windowTitle, app }) {
     ]);
     clearTimeout(timeoutId);
   }
-  const remote = collected;
+  const remote = collected.flatMap((result) => Array.isArray(result) ? result : [result]);
   const refreshedZoey = remote.some((result) => result?.source === "zoey-refresh" && result.block);
   const blocks = local.filter((block) => block.source !== "zoey" || !refreshedZoey);
   let foundContacts = 0;
@@ -1062,7 +1133,7 @@ function buildReplyBrief(notes, context, hasImage, task, contextBlocks) {
     "\n\nOutput only the reply, ready to send, in the author's voice, matching the " +
     "channel's format (chat → short; email → a little more structure). No preamble, " +
     "no quotes, no explanation.";
-  if (contextBlocks.some((block) => block.source === "availability"))
+  if (contextBlocks.some((block) => block.source === "availability" && block.availabilityComplete))
     b += "\nIf the conversation is about meeting, propose 2–3 concrete times from MY REAL AVAILABILITY; never offer a time not listed.";
   return b;
 }
@@ -1765,7 +1836,14 @@ async function main() {
     console.error("revoice: no input text on stdin");
     process.exit(1);
   }
-  const gathered = await gatherContext({ mode, text, context: task.context, windowTitle: task.windowTitle, app: task.app });
+  const gathered = await gatherContext({
+    mode,
+    text,
+    context: task.context,
+    windowTitle: task.windowTitle,
+    app: task.app,
+    hasImage: task.images.length > 0,
+  });
   task.contextBlocks = gathered.blocks;
   for (const block of task.contextBlocks)
     console.error(`context:${block.source === "availability" ? "calendar" : block.source}`);
