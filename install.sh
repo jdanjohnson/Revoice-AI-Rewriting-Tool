@@ -39,8 +39,8 @@ if ! [ -d "/Applications/Hammerspoon.app" ]; then
 fi
 
 # Migrate an existing ~/.spiral-rewrite install (prompt, styles, skills,
-# voice samples, env, history, app-styles) into ~/.revoice. Never overwrites
-# anything already in ~/.revoice.
+# voice samples, env, history, app-styles) into ~/.revoice. User context files
+# are deliberately not copied. Never overwrites anything already in ~/.revoice.
 if [ -d "$OLD_DEST" ]; then
   echo "==> Migrating existing config from $OLD_DEST to $DEST"
   mkdir -p "$DEST"
